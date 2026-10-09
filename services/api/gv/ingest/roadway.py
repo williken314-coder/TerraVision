@@ -390,8 +390,15 @@ def read_roadway_sheet(lines: list[dict], stations: list[tuple], labels: list[di
             continue
         P = np.asarray(ln["pts"], float)
         f = fit_stationing(P, stations, 2.2 * size_ref)
-        if f:
-            fits.append((idx, f))
+        if not f:
+            continue
+        # against a stated scale the stationing must agree, or be a half/double-size print; anything else
+        # means this line isn't the one the stations belong to
+        if ft_per_pt:
+            ratio = abs(f["b"]) / ft_per_pt
+            if not any(abs(ratio / k - 1) <= 0.03 for k in (1.0, 2.0, 0.5)):
+                continue
+        fits.append((idx, f))
     if not fits:
         return None
     top = max(len(f["inliers"]) for _, f in fits)

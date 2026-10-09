@@ -11,3 +11,5 @@ opencv-python-headless>=4.9
 anthropic>=0.40
 # PostgreSQL/PostGIS instead of SQLite (set DATABASE_URL=postgresql+psycopg://...)
 psycopg[binary]>=3.1
+# reads text that CAD plots as line strokes (AutoCAD SHX fonts), e.g. drawing scales under view titles
+rapidocr-onnxruntime>=1.3

@@ -85,6 +85,9 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cals[key] = SheetCalibration(key, ft_per_pt(scale) if scale else None, method)
         sheets.append(Sheet(id=sid, title=r.title or "(untitled)", category=r.category, page=r.page, document_id=doc_id,
                             scale_ft_per_in=scale, notes=f"{len(r.candidates)} labelled items, {r.line_segments} line segments"))
+        if r.scale_source == "ocr" and not ov.get("scale_ft_per_in"):
+            issues.append(Issue(severity="info", code="scale_by_ocr", sheet=sid, page=r.page,
+                                message=f"{sid}: scale {r.scale_text}. It is drawn as line strokes, not text, so it was read from the drawing; check it in Plans → Sheets & calibration."))
         for n in r.notes:
             issues.append(Issue(severity="warning" if "scale" in n.lower() else "blocker", code="sheet_note", message=n, sheet=sid, page=r.page))
         if not r.sheet_id:
@@ -335,7 +338,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                     x, z = cal.pt_to_project(c.x, c.y)
                     pts[which].append((float(x), float(z), c.values["elev"] + elevation_offset))
             elif c.kind == "contour":
-                which = "existing" if c.values["dashed"] else "proposed"
+                which = c.values.get("surface") or ("existing" if c.values["dashed"] else "proposed")
                 arr = np.array(c.values["pts"])
                 x, z = cal.pt_to_project(arr[:, 0], arr[:, 1])
                 pts[which].extend((float(a), float(b), c.values["elev"] + elevation_offset) for a, b in zip(x, z))
