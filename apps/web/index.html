@@ -1,4 +1,4 @@
-<title>GroundVision AI</title>
+<title>TerraVision AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -225,7 +225,7 @@ p{margin:0}
   <header class="top">
     <div class="brand">
       <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect x="1" y="1" width="28" height="28" rx="7" fill="#1a2730" stroke="#24363f"/><path d="M5 19 L11 15 L17 17 L25 11" fill="none" stroke="#e3ebee" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 23.5 H25" stroke="#3ccf6e" stroke-width="2" stroke-linecap="round"/><circle cx="17" cy="17" r="2.6" fill="#ff5c9e"/></svg>
-      <div><b>GroundVision <i>AI</i></b><span id="prjName">Connecting…</span></div>
+      <div><b>TerraVision <i>AI</i></b><span id="prjName">Connecting…</span></div>
     </div>
     <nav class="modes" id="modes" aria-label="Camera mode">
       <button data-mode="bird" aria-pressed="false">Bird's-eye</button>
@@ -728,7 +728,7 @@ async function loadProjects(selectId){const list=await api('/api/projects');$('#
   const id=selectId||store.get('gv.project')||(list.find(p=>!p.demo)||list[0]||{}).id;if(id){$('#prjSel').value=id;await openProject(id);}}
 async function openProject(id){const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
   S={};PRJ.structures.forEach(s=>S[s.id]=s);PIPES=PRJ.pipes;LINES={};PRJ.lines.forEach(l=>LINES[l.id]=l);lastPaint='';buildSite();buildUtil();renderInspect();renderReview();
-  const empty=!PRJ.structures.length&&!PRJ.existing&&!PRJ.proposed;showBanner(empty?`<b>No model yet.</b> Open <b>Plans</b> and upload a PDF plan set. GroundVision reads sheet numbers, scales, contours, spot elevations, structures, rims, inverts and pipe callouts, then builds the 3D model from what it finds.`:'');
+  const empty=!PRJ.structures.length&&!PRJ.existing&&!PRJ.proposed;showBanner(empty?`<b>No model yet.</b> Open <b>Plans</b> and upload a PDF plan set. TerraVision reads sheet numbers, scales, contours, spot elevations, structures, rims, inverts and pipe callouts, then builds the 3D model from what it finds.`:'');
   setStage(st.stage,true);setMode(PRJ.structures.length?'xray':'bird');const h=homePose();camera.position.copy(h.p);controls.target.copy(h.t);st.tween=null;
   log.innerHTML='';welcome();}
 $('#prjSel').addEventListener('change',e=>openProject(e.target.value).catch(err=>toast(err.message)));
@@ -776,7 +776,7 @@ $('#simX').onclick=()=>{endSim();if(st.mode==='operator')setMode('bird');};
 
 // ===== Assistant (answers come from the API, grounded in the plans) =====
 const log=$('#log');
-function say(who,html,sources){const d=document.createElement('div');d.className='msg '+who;d.innerHTML=(who==='a'?'<span class="who">GroundVision</span>':'')+html+(sources&&sources.length?`<div class="sources">${sources.map(s=>`<span>${esc(s)}</span>`).join('')}</div>`:'');log.appendChild(d);const body=$('#dockBody');requestAnimationFrame(()=>body.scrollTop=body.scrollHeight);}
+function say(who,html,sources){const d=document.createElement('div');d.className='msg '+who;d.innerHTML=(who==='a'?'<span class="who">TerraVision</span>':'')+html+(sources&&sources.length?`<div class="sources">${sources.map(s=>`<span>${esc(s)}</span>`).join('')}</div>`:'');log.appendChild(d);const body=$('#dockBody');requestAnimationFrame(()=>body.scrollTop=body.scrollHeight);}
 const CHIPS=['Show me every storm pipe',"What's the invert elevation of CB-4?",'Where does the proposed water main cross the sewer?','How much excavation is required?','Show me the finished roadway','How deep is this pipe below finished grade?','What still needs review?'];
 $('#chips').innerHTML=CHIPS.map(c=>`<button class="chip" data-act="ask" data-q="${esc(c)}">${esc(c)}</button>`).join('');
 async function ask(q){q=(q||'').trim();if(!q||!PRJ)return;say('u',esc(q));openTab('ask');
@@ -847,6 +847,6 @@ function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;
 // ===== Boot =====
 setStage(7,true);requestAnimationFrame(loop);
 api('/api/health').then(h=>{if(!h.vision_available)console.info('Vision reader off: set ANTHROPIC_API_KEY on the server to read scanned sheets.');return loadProjects();})
-  .catch(err=>{$('#prjName').textContent='Backend not connected';showBanner(`<b>Can't reach the GroundVision server.</b> Start it with <span class="mono">uvicorn gv.api:app</span> and open this page from it (http://localhost:8000), or add <span class="mono">?api=https://your-server</span> to the address. (${esc(err.message)})`);});
+  .catch(err=>{$('#prjName').textContent='Backend not connected';showBanner(`<b>Can't reach the TerraVision server.</b> Start it with <span class="mono">uvicorn gv.api:app</span> and open this page from it (http://localhost:8000), or add <span class="mono">?api=https://your-server</span> to the address. (${esc(err.message)})`);});
 })();
 </script>

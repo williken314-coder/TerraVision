@@ -15,7 +15,7 @@ from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, create
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATA_DIR = Path(os.environ.get("GV_DATA_DIR", "./data")).resolve()
-DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DATA_DIR / 'groundvision.db'}")
+DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DATA_DIR / 'terravision.db'}")
 
 
 def now():

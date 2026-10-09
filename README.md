@@ -1,9 +1,9 @@
-# GroundVision AI
+# TerraVision AI
 
-Upload a civil plan set (PDF). GroundVision reads it, builds a 3D model of the jobsite from what is actually printed on the sheets, and flags everything it isn't sure about for a person to confirm.
+Upload a civil plan set (PDF). TerraVision reads it, builds a 3D model of the jobsite from what is actually printed on the sheets, and flags everything it isn't sure about for a person to confirm.
 
 ```
-apps/web/            The GroundVision interface (Three.js), served by the API at /
+apps/web/            The TerraVision interface (Three.js), served by the API at /
 services/api/        Python backend: FastAPI, PDF reading, geometry engine, database
   gv/ingest/         Plan interpretation pipeline (PyMuPDF, OpenCV, optional vision model)
   gv/geometry/       Deterministic engineering math (alignments, TIN surfaces, pipes, crossings, earthwork, trenches, checks)

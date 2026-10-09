@@ -1,4 +1,4 @@
-"""GroundVision API (FastAPI).
+"""TerraVision API (FastAPI).
 
 Run:  uvicorn gv.api:app --reload --port 8000
 Then open http://localhost:8000 for the app.
@@ -40,7 +40,7 @@ def _web_dir() -> Path:
 
 WEB_DIR = _web_dir()
 
-app = FastAPI(title="GroundVision API", version="0.2.0")
+app = FastAPI(title="TerraVision API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
 
 
