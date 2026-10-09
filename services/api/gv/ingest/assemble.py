@@ -186,7 +186,9 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             issues.append(Issue(severity="warning", code="position_disagreement", object_id=sid, message=f"{sid} is placed {spread:.1f} ft apart on different sheets."))
         position = Fact[list](value=[float(xs.mean()), float(zs.mean())], status=Status.verified if len(e["pos"]) >= 2 and spread < 1 and pos_conf >= 0.8 else Status.ai,
                               confidence=round(pos_conf, 2), source=best_pos["sheet"], page=best_pos["page"], bbox=best_pos["bbox"], text=best_pos["text"], document_id=best_pos["doc"])
-        rim = _merge_values(e["rims"], f"{sid} rim", sid, issues)
+        # headwalls and flared end sections have no rim; only report one if a sheet prints it
+        no_rim = KIND_BY_PREFIX.get(prefix) == "HW" and not e["rims"]
+        rim = _merge_values(e["rims"], f"{sid} rim", sid, [] if no_rim else issues)
         structures.append(Structure(id=sid, system=system, kind=KIND_BY_PREFIX.get(prefix, "OTHER"), x=position.value[0], z=position.value[1],
                                     position=position, rim=rim, type=Fact[str](value=None, status=Status.missing), sheet=best_pos["sheet"]))
         invs_by_id[sid] = e["invs"]

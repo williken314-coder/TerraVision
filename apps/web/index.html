@@ -1,3 +1,7 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>TerraVision AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -129,6 +133,7 @@ p{margin:0}
 .askf input:focus{border-color:var(--accent);outline:none}
 
 /* Viewport overlays */
+[hidden]{display:none!important}
 .ov{position:absolute;z-index:2}
 .tl{top:12px;left:12px;display:flex;flex-direction:column;gap:8px;align-items:flex-start;max-width:calc(100% - 130px)}
 .tr{top:12px;right:12px;display:flex;flex-direction:column;gap:6px;align-items:stretch}
@@ -214,6 +219,7 @@ p{margin:0}
 .calib small{display:block;color:var(--muted);font-size:12px}
 .calib .sc{display:flex;gap:4px;align-items:center;grid-column:1/-1}
 .calib .sc input{width:5.5em}
+#datumForm .calib{grid-template-columns:4.2em minmax(7em,1fr) minmax(0,1fr)}
 .srcimg{grid-column:1/-1;max-width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:4px}
 .sources{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
 .sources span{font:600 10.5px var(--f-mono);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);border-radius:4px;padding:0 5px}

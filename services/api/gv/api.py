@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -40,23 +41,24 @@ def _web_dir() -> Path:
 
 WEB_DIR = _web_dir()
 
-app = FastAPI(title="TerraVision API", version="0.2.0")
-app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
-
-
-def get_db():
-    with dbm.SessionLocal() as s:
-        yield s
-
-
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     dbm.init_db()
     with dbm.SessionLocal() as db:
         if not dbm.get_project_row(db, "maple-ridge"):
             demo = build_demo()
             db.add(dbm.ProjectRow(id=demo.id, name=demo.name, model=demo.model_dump(mode="json"), overrides={}))
             db.commit()
+    yield
+
+
+app = FastAPI(title="TerraVision API", version="0.2.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+
+
+def get_db():
+    with dbm.SessionLocal() as s:
+        yield s
 
 
 def _load(db: Session, pid: str) -> tuple[dbm.ProjectRow, Project]:

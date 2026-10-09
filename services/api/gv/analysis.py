@@ -38,6 +38,8 @@ def review_items(prj: Project) -> list[dict]:
     for kind, obj in _objects(prj):
         for f in FIELDS[kind]:
             fact = getattr(obj, f)
+            if kind == "structure" and obj.kind == "HW" and f == "rim" and fact.value is None:
+                continue  # headwalls have no rim
             if isinstance(fact, Fact) and fact.needs_review():
                 out.append(dict(object_id=obj.id, field=f, status=fact.status.value, confidence=fact.confidence, value=fact.value,
                                 source=fact.source or getattr(obj, "sheet", None), page=fact.page, bbox=fact.bbox, text=fact.text,

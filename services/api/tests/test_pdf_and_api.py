@@ -54,6 +54,9 @@ def test_upload_and_interpret(client):
     data = client.get(f"/api/projects/{pid}").json()
     assert len(data["project"]["structures"]) == 11
     assert data["analysis"]["earthwork"]["available"]
+    # headwalls have no rim: not an issue, not a review item
+    assert not any(i["object_id"] == "HW-1" and i["code"] == "missing_value" for i in data["project"]["issues"])
+    assert not any(r["object_id"] == "HW-1" and r["field"] == "rim" for r in data["analysis"]["review"])
     cb4 = next(s for s in data["project"]["structures"] if s["id"] == "CB-4")
     assert cb4["rim"]["value"] == 1045.76 and cb4["rim"]["source"]
     png = client.get(f"/api/documents/{did}/pages/2.png", params={"bbox": ",".join(map(str, cb4["rim"]["bbox"]))})
