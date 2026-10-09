@@ -31,7 +31,8 @@ def test_scale_parsing():
 
 def test_sheets_are_identified():
     got = [(r.sheet_id, r.category) for _, r in reports()]
-    assert got == [("C-0.0", "cover"), ("C-3.0", "grading"), ("C-4.0", "storm"), ("C-4.1", "storm_profile"), ("C-5.0", "sanitary")]
+    assert got == [("C-0.0", "cover"), ("C-3.0", "grading"), ("C-4.0", "storm"), ("C-4.1", "storm_profile"), ("C-5.0", "sanitary"),
+                   ("C-6.0", "roadway"), ("C-6.1", "roadway")]
 
 
 def test_assembly_matches_the_drawn_plans():

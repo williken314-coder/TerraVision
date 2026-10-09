@@ -12,6 +12,8 @@ EDITABLE = {
     "structure": {"rim", "type"},
     "pipe": {"dia_in", "material", "inv_up", "inv_dn"},
     "line": {"dia_in", "material", "cover"},
+    "edge": {"offset"},
+    "section": {"pavement_section"},
 }
 
 
@@ -34,6 +36,10 @@ def apply_edit(prj: Project, e: FieldEdit) -> str:
     if obj is None:
         obj, kind = prj.line(e.object_id), "line"
     if obj is None:
+        obj, kind = prj.road_edge(e.object_id), "edge"
+    if obj is None and prj.corridor and e.object_id == prj.corridor.id:
+        obj, kind = prj.corridor, "section"
+    if obj is None:
         raise EditError(f"No object {e.object_id}")
     if e.field not in EDITABLE[kind]:
         raise EditError(f"{e.field} is not editable on a {kind}")
@@ -45,13 +51,15 @@ def apply_edit(prj: Project, e: FieldEdit) -> str:
         return f"{e.object_id} {e.field} confirmed"
     if e.value is None:
         raise EditError("A value is required")
-    if isinstance(fact.value, (int, float)) or e.field in ("rim", "inv_up", "inv_dn", "cover", "dia_in"):
+    if isinstance(fact.value, (int, float)) or e.field in ("rim", "inv_up", "inv_dn", "cover", "dia_in", "offset"):
         try:
             v = float(e.value)
         except (TypeError, ValueError):
             raise EditError("Enter a number")
         if e.field in ("rim", "inv_up", "inv_dn") and fact.value is not None and abs(v - fact.value) > 40:
             raise EditError("Elevation is more than 40 ft from the current value; check the datum")
+        if e.field == "offset" and not 0 < v < 300:
+            raise EditError("Offset is feet from the centerline, between 0 and 300")
         fact.value = round(v, 2)
     else:
         fact.value = str(e.value).strip()

@@ -20,9 +20,11 @@ from collections import defaultdict
 import numpy as np
 
 from ..geometry.surface import TIN, Grid
-from ..models import Fact, GridSurface, Issue, Pipe, Sheet, Status, Structure
+from ..geometry.alignment import offset_label, station_label
+from ..models import EDGE_CODES, EDGE_NAMES, Alignment, AlignmentPoint, CorridorTemplate, Fact, GridSurface, Issue, Pipe, RoadEdge, Sheet, Status, Structure
 from .calibration import SheetCalibration, Similarity, fit_similarity, ft_per_pt
-from .pdf import PLAN_CATEGORIES, PROFILE_CATEGORIES, SheetReport
+from .pdf import PLAN_CATEGORIES, PROFILE_CATEGORIES, ROAD_CATEGORIES, SheetReport
+from .roadway import link_by_stationing, read_roadway_sheet
 
 SYSTEM_BY_PREFIX = {"CB": "storm", "INL": "storm", "DI": "storm", "HW": "storm", "FES": "storm", "STMH": "storm",
                     "SMH": "san", "FH": "water", "WV": "water", "TX": "elec"}
@@ -89,6 +91,36 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             issues.append(Issue(severity="info", code="no_sheet_number", message=f"Page {r.page + 1}: no sheet number found in the title block.", page=r.page))
 
     sid_of = {sheet_key(s.document_id, s.page): s.id for s in sheets}
+    sheet_of = {sheet_key(s.document_id, s.page): s for s in sheets}
+
+    # 1b. roadway centerlines, stationing and edges (sheet feet) -------------
+    road: dict[str, dict] = {}
+    for key, r in rep_by_key.items():
+        if not r.linework:
+            continue
+        sid, cal = sid_of[key], cals[key]
+        stations = [(c.x, c.y, c.values["station"], i) for i, c in enumerate(r.candidates) if c.kind == "station"]
+        labels = [dict(x=c.x, y=c.y, kind=c.label, size=c.values.get("size", 6.0), text=c.text, bbox=c.bbox)
+                  for c in r.candidates if c.kind == "road_label"]
+        res = read_roadway_sheet(r.linework, stations, labels, cal.ft_per_pt, max(12.0, min(r.width_pt, r.height_pt) * 0.02))
+        if not res:
+            if len(stations) >= 2 and r.category in ROAD_CATEGORIES:
+                issues.append(Issue(severity="info", code="no_centerline", sheet=sid, page=r.page,
+                                    message=f"{sid} has station labels, but no centerline with road edges on both sides was found along them."))
+            continue
+        measured_in = res["measured_ft_per_pt"] * 72
+        if cal.ft_per_pt is None:
+            cal.ft_per_pt, cal.method = res["measured_ft_per_pt"], "stationing"
+            sheet_of[key].scale_ft_per_in = round(measured_in, 2)
+            issues[:] = [i for i in issues if not (i.code == "sheet_note" and i.page == r.page and i.sheet == sid and "scale" in i.message.lower())]
+            issues.append(Issue(severity="info", code="scale_from_stationing", sheet=sid, page=r.page,
+                                message=f"{sid} states no scale; using 1\" = {measured_in:.1f}' measured from its stationing. Set the scale in Plans if that's wrong."))
+        elif abs(res["measured_ft_per_pt"] / cal.ft_per_pt - 1) > 0.02:
+            issues.append(Issue(severity="warning", code="scale_vs_stationing", sheet=sid, page=r.page,
+                                message=f"Stationing on {sid} measures 1\" = {measured_in:.1f}', but the sheet says 1\" = {cal.ft_per_pt * 72:.0f}'. "
+                                        "A half-size print or a wrong scale note? Set the scale in Plans."))
+        res["matchlines"] = [(c.values["station"], c.values.get("sheet_ref"), sid) for c in r.candidates if c.kind == "matchline"]
+        road[key] = res
 
     # 2. structure positions on each calibrated plan sheet (sheet-local feet) ----
     local: dict[str, dict[str, tuple]] = {}
@@ -110,10 +142,20 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         if pos:
             local[key] = pos
 
-    # 3. register sheets into one frame through shared structures -----------
+    # 3. register sheets into one frame through shared structures, or matchline stationing ----
     registered: dict[str, Similarity] = {}
-    if local:
-        primary = max(local, key=lambda k: len(local[k]))
+    anchors = [k for k in rep_by_key if k in local or k in road]  # report order: ties resolve the same way every time
+    if not anchors:
+        # no structures and no roadway: place the scaled plan sheet with the most to read (e.g. a grading-only set)
+        scaled = [k for k, r in rep_by_key.items() if r.category in PLAN_CATEGORIES and cals[k].ft_per_pt and r.candidates]
+        if scaled:
+            anchors = [max(scaled, key=lambda k: len(rep_by_key[k].candidates))]
+            for k in scaled:
+                if k not in anchors:
+                    issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[k], page=rep_by_key[k].page,
+                                        message=f"{sid_of[k]} shares no labelled structures or stationing with {sid_of[anchors[0]]}, so its geometry is not placed. Add control points to register it."))
+    if anchors:
+        primary = max(anchors, key=lambda k: (len(local.get(k, {})), road[k]["s_range"][1] - road[k]["s_range"][0] if k in road else 0))
         ctrl = overrides.get(primary, {}).get("control_points")
         if ctrl and len(ctrl) >= 2:
             k = cals[primary].ft_per_pt
@@ -123,6 +165,16 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         changed = True
         while changed:
             changed = False
+            for key in [k for k in road if k not in registered]:
+                for rk in [k for k in road if k in registered]:
+                    link = link_by_stationing(road[key], road[rk], registered[rk], road[key]["matchlines"] + road[rk]["matchlines"], sid_of[key], sid_of[rk])
+                    if link:
+                        registered[key] = link[0]
+                        changed = True
+                        issues.append(Issue(severity="info", code="placed_by_stationing", sheet=sid_of[key], page=rep_by_key[key].page,
+                                            message=f"{sid_of[key]} placed next to {sid_of[rk]} by matching their centerline stationing at the matchline, STA {station_label(link[1], 2)}. "
+                                                    "That fixes position well but direction less so; control points or two shared structures place it more precisely."))
+                        break
             for key, pos in local.items():
                 if key in registered:
                     continue
@@ -146,6 +198,10 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             if key not in registered:
                 issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[key], page=rep_by_key[key].page,
                                     message=f"{sid_of[key]} shares fewer than two labelled structures with the other plan sheets, so its geometry is not placed. Add control points to register it."))
+        for key in road:
+            if key not in registered and key not in local:
+                issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[key], page=rep_by_key[key].page,
+                                    message=f"{sid_of[key]}'s roadway shares no labelled structures, and no matchline stationing, with the placed sheets, so it is not placed. Add control points to register it."))
     for key, sim in registered.items():
         cals[key].to_project = sim
         for s in sheets:
@@ -305,8 +361,19 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         m.point_count = len(P)
         surfaces[which] = m
 
+    # 7. roadway: one alignment and its edges, from the placed roadway sheets ---
+    pieces = []
+    for key, res in road.items():
+        if key in registered:
+            x, z = registered[key].apply(np.array(res["x"]), np.array(res["z"]))
+            pieces.append(dict(key=key, sheet=sid_of[key], page=rep_by_key[key].page, doc=doc_of[key], res=res,
+                               s=np.array(res["stations"]), x=np.asarray(x, float), z=np.asarray(z, float)))
+    alignment, corridor = _build_road(pieces, issues) if pieces else (None, None)
+    if corridor is not None:
+        corridor.pavement_section = _pavement_section(rep_by_key, sid_of, doc_of, issues)
+
     return dict(sheets=sheets, structures=structures, pipes=pipes, existing=surfaces.get("existing"), proposed=surfaces.get("proposed"),
-                issues=issues, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
+                alignment=alignment, corridor=corridor, issues=issues, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
                                                      transform=c.to_project.as_dict() if c.to_project else None) for k, c in cals.items()})
 
 
@@ -391,3 +458,126 @@ def _make_pipe(a: Structure, b: Structure, invs_by_id: dict, co, sheet: str, pag
         issues.append(Issue(severity="warning", code="missing_inverts", object_id=pid, message=f"{pid} ({a.id} to {b.id}): matching INV OUT / INV IN not found. Check the profile sheet."))
     return Pipe(id=pid, system=system, from_id=up.id, to_id=dn.id, dia_in=dia_f, material=mat_f, wall_ft=wall_ft(dia, mat),
                 inv_up=inv_up, inv_dn=inv_dn, sheet=sheet)
+
+
+def _same_road(a: dict, b: dict) -> bool:
+    """Two placed centerline pieces are one road if they agree where their stationing overlaps or meets."""
+    lo, hi = max(a["s"][0], b["s"][0]), min(a["s"][-1], b["s"][-1])
+    if hi - lo >= 5:
+        ss = np.linspace(lo, hi, 5)
+    elif lo - hi <= 10:
+        ss = np.array([(lo + hi) / 2])
+    else:
+        return False
+    d = np.hypot(np.interp(ss, a["s"], a["x"]) - np.interp(ss, b["s"], b["x"]), np.interp(ss, a["s"], a["z"]) - np.interp(ss, b["s"], b["z"]))
+    return bool(d.max() <= 3.0 + max(0.0, lo - hi))
+
+
+def _build_road(pieces: list[dict], issues: list[Issue]) -> tuple[Alignment, CorridorTemplate | None]:
+    pieces = sorted(pieces, key=lambda p: -(p["s"][-1] - p["s"][0]))
+    group, rest = [pieces[0]], pieces[1:]
+    changed = True
+    while changed:
+        changed = False
+        for p in list(rest):
+            if any(_same_road(p, g) for g in group):
+                group.append(p)
+                rest.remove(p)
+                changed = True
+    for p in rest:
+        issues.append(Issue(severity="info", code="other_alignment", sheet=p["sheet"], page=p["page"],
+                            message=f"{p['sheet']} has another centerline (STA {station_label(p['s'][0])} to {station_label(p['s'][-1])}). "
+                                    "Only one road per project is modeled so far."))
+    # centerline points: each piece adds only the stations not already covered
+    pts, covered = [], []
+    for p in group:
+        for s_, x_, z_ in zip(p["s"], p["x"], p["z"]):
+            if not any(a - 0.5 <= s_ <= b + 0.5 for a, b in covered):
+                pts.append((float(s_), float(x_), float(z_)))
+        covered.append((float(p["s"][0]), float(p["s"][-1])))
+    pts.sort()
+    sheets = sorted({p["sheet"] for p in group})
+    fits = [p["res"]["fit"] for p in group]
+    conf = 0.9 if all(len(f["inliers"]) >= 3 and f["rms"] < 0.5 for f in fits) else 0.7
+    alignment = Alignment(name=f"Centerline ({', '.join(sheets)})", source=", ".join(sheets), confidence=conf,
+                          points=[AlignmentPoint(s=round(s_, 2), x=round(x_, 3), z=round(z_, 3)) for s_, x_, z_ in pts])
+
+    # edges: the same kind and side from every piece, combined by how much road each covers
+    by = defaultdict(list)
+    for p in group:
+        for e in p["res"]["edges"]:
+            if e["kind"] in EDGE_CODES:
+                by[(e["kind"], e["side"])].append((e, p))
+    edges: list[RoadEdge] = []
+    for (kind, side), lst in sorted(by.items()):
+        offs = [e["offset"] for e, _ in lst]
+        cov = [e["coverage"] for e, _ in lst]
+        off = float(np.average(offs, weights=cov))
+        main_e, main_p = max(lst, key=lambda t: t[0]["coverage"])
+        eid = f"{EDGE_CODES[kind]}-{side}T"
+        if max(offs) - min(offs) > 0.5:
+            issues.append(Issue(severity="warning", code="edge_disagreement", object_id=eid,
+                                message=f"{EDGE_NAMES[kind].capitalize()} {side}T is {', '.join(f'{o:.1f} ft on {p_['sheet']}' for (e_, p_), o in zip(lst, offs))}. "
+                                        "The section may change along the road; only one width is modeled."))
+        by_label = [t for t in lst if t[0]["named_by"] == "label"]
+        lab = max(by_label, key=lambda t: t[0]["coverage"])[0]["label"] if by_label else None
+        conf_e = 0.8 if by_label else 0.55
+        if len({p_["sheet"] for _, p_ in lst}) >= 2 and max(offs) - min(offs) <= 0.2:
+            conf_e += 0.1
+        fact = Fact[float](value=round(off, 2), status=Status.ai, confidence=round(conf_e, 2), source=main_p["sheet"], page=main_p["page"],
+                           document_id=main_p["doc"], bbox=lab["bbox"] if lab else None,
+                           text=f"“{lab['text']}” label on a line {offset_label(-off if side == 'L' else off)}" if lab else f"line {offset_label(-off if side == 'L' else off)} of centerline, named from its order")
+        edges.append(RoadEdge(id=eid, kind=kind, side=side, offset=fact, station_from=round(min(e["s0"] for e, _ in lst), 1),
+                              station_to=round(max(e["s1"] for e, _ in lst), 1), named_by="label" if by_label else "order"))
+    # symmetric sections: both sides read the same raises confidence
+    for e in edges:
+        o = next((x for x in edges if x.kind == e.kind and x.side != e.side), None)
+        if o and abs(o.offset.value - e.offset.value) <= 0.3:
+            e.offset.confidence = round(min(0.95, e.offset.confidence + 0.05), 2)
+    ordered = [e.id for e in edges if e.named_by == "order"]
+    if ordered:
+        issues.append(Issue(severity="info", code="edges_by_order", message=f"No labels on {', '.join(ordered)}: named from their order outward from the centerline. Confirm them in Inspect."))
+    if not edges:
+        issues.append(Issue(severity="warning", code="no_road_edges", message=f"Centerline found on {alignment.source}, but no pavement, curb or sidewalk lines were identified along it."))
+        return alignment, None
+    pav = [e.offset.value for e in edges if e.kind == "pavement"]
+    if len(pav) < 2:
+        issues.append(Issue(severity="warning", code="no_pavement_edges", message=f"Edge of pavement wasn't identified on both sides of the centerline on {alignment.source}, so the road surface isn't drawn."))
+    corridor = CorridorTemplate(pavement_half_width=round(float(np.mean(pav)), 2) if len(pav) == 2 else None, crown_slope_assumed=True,
+                                curb_width=None, walk_inner=None, walk_outer=None, edges=edges,
+                                pavement_section=Fact[str](value=None, status=Status.missing))
+    issues.append(Issue(severity="info", code="crown_assumed", message="The road is drawn with a 2% crown; cross slope isn't read from the plans yet."))
+    return alignment, corridor
+
+
+def _pavement_section(rep_by_key: dict, sid_of: dict, doc_of: dict, issues: list[Issue]) -> Fact:
+    """Pavement layers printed together (a typical section or a note), read top-down. Missing if none are found."""
+    groups = []
+    for key, r in rep_by_key.items():
+        layers = sorted((c for c in r.candidates if c.kind == "pavement_layer"), key=lambda c: (c.y, c.x))
+        for c in layers:
+            g = next((g for g in groups if g["key"] == key and min(abs(c.y - o.y) + abs(c.x - o.x) * 0.25 for o in g["c"]) < 60), None)
+            if g:
+                g["c"].append(c)
+            else:
+                groups.append(dict(key=key, c=[c]))
+    surface = ("ASPHALT", "HMA", "AC", "A.C.", "CONCRETE", "PCC", "P.C.C.")
+    groups = [g for g in groups if len(g["c"]) >= 2 and any(any(w in c.values["material"] for w in surface) for c in g["c"])]
+    if not groups:
+        return Fact[str](value=None, status=Status.missing)
+    rank = {"details": 0, "cross_section": 1, "roadway": 2}
+    groups.sort(key=lambda g: (-len(g["c"]), rank.get(rep_by_key[g["key"]].category, 3)))
+    g = groups[0]
+    if len(groups) > 1:
+        issues.append(Issue(severity="info", code="pavement_sections", message=f"{len(groups)} pavement sections found; using the one on {sid_of[g['key']]}. Others are on "
+                            + ", ".join(sorted({sid_of[o['key']] for o in groups[1:]})) + "."))
+    seen, parts = set(), []
+    for c in g["c"]:
+        t = f"{c.values['thickness_in']:g} in {c.values['material'].lower()}"
+        if t not in seen:
+            seen.add(t)
+            parts.append(t)
+    xs = [v for c in g["c"] for v in c.bbox]
+    r = rep_by_key[g["key"]]
+    return Fact[str](value=" / ".join(parts), status=Status.ai, confidence=0.7, source=sid_of[g["key"]], page=r.page, document_id=doc_of[g["key"]],
+                     bbox=[min(xs[0::4]), min(xs[1::4]), max(xs[2::4]), max(xs[3::4])], text=" | ".join(dict.fromkeys(c.text for c in g["c"])))

@@ -16,6 +16,7 @@ import os
 import re
 
 from .analysis import analyze
+from .geometry.alignment import station_label
 from .models import Project
 
 SYS_WORDS = [("storm", r"storm|drain|catch|inlet|culvert"), ("san", r"sanit|sewer"), ("water", r"water|hydrant"), ("elec", r"electric|power|conduit|light")]
@@ -142,7 +143,24 @@ def answer(prj: Project, q: str, selected: str | None = None) -> dict:
     if re.search(r"road|pav|finish|after|complete", t):
         if not prj.alignment:
             return done("Roadway surfaces (pavement, curb, sidewalk) haven't been extracted from these plans yet, so I can't show a finished roadway. I can show the finished-grade surface and utilities.", [{"type": "mode", "mode": "finished"}])
-        return done("Here's the finished roadway: pavement, curb and gutter, and sidewalks built from the alignment and typical section.", [{"type": "mode", "mode": "finished"}], ["C-7.0", "C-8.0"])
+        cr = prj.corridor
+        al_src = (prj.alignment.source or "").split(", ")
+        if prj.demo or not cr or not cr.edges:
+            body = "pavement, curb and gutter, and sidewalks built from the alignment and typical section." if cr else "the centerline only; road edges weren't identified."
+            srcs = ["C-7.0", "C-8.0"] if prj.demo else al_src
+            return done(f"Here's the finished roadway: {body}", [{"type": "mode", "mode": "finished"}], srcs)
+        def side(kind):
+            v = [f"{e.offset.value:.1f} ft {e.side}T" for e in cr.edges if e.kind == kind]
+            return " / ".join(v) if v else "not found"
+        parts = [f"edge of pavement {side('pavement')}", f"back of curb {side('curb_back')}"]
+        if any(e.kind.startswith("walk") for e in cr.edges):
+            parts.append(f"sidewalk {side('walk_inner')} to {side('walk_outer')}")
+        sec = cr.pavement_section
+        txt = (f"Here's the finished roadway along {prj.alignment.name}, STA {station_label(prj.alignment.points[0].s)} to {station_label(prj.alignment.points[-1].s)}: "
+               + "; ".join(parts) + ". "
+               + (f"Pavement section: {sec.value} ({sec.source})." if sec.value else "No pavement section was found in the plans.")
+               + (f" Elevations: {prj.alignment.profile_source}." if prj.alignment.profile_source else ""))
+        return done(txt, [{"type": "mode", "mode": "finished"}], al_src + ([sec.source] if sec.source else []))
 
     if re.search(r"review|confirm|verif|uncertain|missing|issue|problem", t):
         n = a["review"]

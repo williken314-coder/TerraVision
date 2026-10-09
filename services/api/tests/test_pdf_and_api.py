@@ -15,7 +15,7 @@ def test_pdf_reader_on_sample_set():
     from gv.ingest.pdf import read_plan_set
 
     reps = read_plan_set(SAMPLE.read_bytes())
-    assert [r.sheet_id for r in reps] == ["C-0.0", "C-3.0", "C-4.0", "C-4.1", "C-5.0"]
+    assert [r.sheet_id for r in reps] == ["C-0.0", "C-3.0", "C-4.0", "C-4.1", "C-5.0", "C-6.0", "C-6.1"]
     storm = reps[2]
     assert storm.category == "storm" and storm.scale_ft_per_in == 40
     ids = {c.label for c in storm.candidates if c.kind == "structure"}

@@ -371,6 +371,12 @@ function gridOf(m){if(!m)return null;const W=m.nx+1,e=Float32Array.from(m.elev,v
   return{m,W,e,x0:m.x0,z0:m.z0,cell:m.cell,nx:m.nx,nz:m.nz,
     sample(x,z){const ri=(x-m.x0)/m.cell,rj=(z-m.z0)/m.cell;if(ri<0||rj<0||ri>m.nx||rj>m.nz)return NaN;const i=Math.min(m.nx-1,Math.floor(ri)),j=Math.min(m.nz-1,Math.floor(rj)),u=ri-i,v=rj-j;
       return e[j*W+i]*(1-u)*(1-v)+e[j*W+i+1]*u*(1-v)+e[(j+1)*W+i]*(1-u)*v+e[(j+1)*W+i+1]*u*v;}};}
+const EDGE_NAME={pavement:'Edge of pavement',curb_face:'Face of curb',curb_back:'Back of curb',walk_inner:'Sidewalk, inner edge',walk_outer:'Sidewalk, outer edge',row:'Right-of-way'};
+function sides(){const cr=PRJ&&PRJ.corridor;if(!cr)return null;
+  if(!(cr.edges&&cr.edges.length)){const hw=cr.pavement_half_width,sd={pav:hw,back:hw!=null&&cr.curb_width!=null?hw+cr.curb_width:null,wi:cr.walk_inner,wo:cr.walk_outer};return{L:sd,R:{...sd}};}
+  const E=(k,sd)=>{const e=cr.edges.find(e=>e.kind===k&&e.side===sd);return e&&e.offset.value!=null?e.offset.value:null;};
+  const sd=x=>({pav:E('pavement',x),back:E('curb_back',x),wi:E('walk_inner',x),wo:E('walk_outer',x)});return{L:sd('L'),R:sd('R')};}
+function roadObj(id){const cr=PRJ&&PRJ.corridor;if(!cr||!(cr.edges&&cr.edges.length))return null;return id===cr.id?cr:cr.edges.find(e=>e.id===id)||null;}
 function mkAlign(a){if(!a||!a.points||a.points.length<2)return null;const P=a.points,n=P.length;
   const nx=[],nz=[],tx=[],tz=[];for(let i=0;i<n;i++){const p=P[Math.max(0,i-1)],q=P[Math.min(n-1,i+1)];const dx=q.x-p.x,dz=q.z-p.z,l=Math.hypot(dx,dz);tx.push(dx/l);tz.push(dz/l);nx.push(-dz/l);nz.push(dx/l);}
   const L=P[n-1].s,S0=P[0].s;
@@ -446,7 +452,7 @@ function treeSet(list,col){const g=new T.Group();if(!list.length)return g;const 
 
 // ----- build the static site from project data -----
 function buildSite(){while(SITE.children.length){const c=SITE.children.pop();disposeTree(c);}O={};lastPaint='';
-  EG=gridOf(PRJ.existing);FG=gridOf(PRJ.proposed);AL=mkAlign(PRJ.alignment);
+  EG=gridOf(PRJ.existing);FG=gridOf(PRJ.proposed);AL=mkAlign(PRJ.alignment);const SD=sides();
   const rims=PRJ.structures.map(s=>s.rim.value).filter(v=>v!=null),grid=FG||EG;
   if(grid){const v=Array.from(grid.e).filter(isFinite).sort((a,b)=>a-b);BASE=v.length?v[Math.floor(v.length*.05)]-6:0;}else if(rims.length)BASE=Math.min(...rims)-15;else BASE=0;
   // site extents
@@ -460,16 +466,23 @@ function buildSite(){while(SITE.children.length){const c=SITE.children.pop();dis
   if(FG){O.propMesh=new T.Mesh(surfGeo(FG),mProp);O.propMesh.userData={kind:'ground'};O.propMesh.receiveShadow=true;O.propC=contourObj(FG,false);SITE.add(O.propMesh,O.propC);
     // per-vertex existing ground under the finished-grade grid, for cut/fill coloring
     const N=(FG.nx+1)*(FG.nz+1);O.egUnder=new Float32Array(N);O.road=new Uint8Array(N);
-    for(let k=0;k<N;k++){const x=FG.x0+(k%FG.W)*FG.cell,z=FG.z0+Math.floor(k/FG.W)*FG.cell;O.egUnder[k]=egAt(x,z);if(AL){const o=AL.xz2so(x,z);if(o.s>=AL.S0&&o.s<=AL.L&&Math.abs(o.d)<=15)O.road[k]=1;}
+    for(let k=0;k<N;k++){const x=FG.x0+(k%FG.W)*FG.cell,z=FG.z0+Math.floor(k/FG.W)*FG.cell;O.egUnder[k]=egAt(x,z);if(AL){const o=AL.xz2so(x,z),sd=SD?(o.d<0?SD.L:SD.R):null,lim=sd&&sd.pav!=null?sd.pav+1:15;if(o.s>=AL.S0&&o.s<=AL.L&&Math.abs(o.d)<=lim)O.road[k]=1;}
       if(PRJ.pond&&Math.hypot((x-PRJ.pond.x)/PRJ.pond.rx,(z-PRJ.pond.z)/PRJ.pond.rz)<1)O.road[k]=2;}}
   // corridor (only when an alignment and typical section exist)
   O.road3={};
-  if(AL&&PRJ.corridor&&FG){const cr=PRJ.corridor,hw=cr.pavement_half_width,cs=cr.crown_slope,ze=(r,a)=>r+.22+.02*(a-14);
-    const crown=s=>{const r=AL.prof(s);return[-hw,-hw/2,0,hw/2,hw].map(x=>[x,r-cs*Math.abs(x)+.06]);};
+  // only what the plans show: curbs and walks are drawn on a side only where their lines were read
+  if(AL&&SD&&FG&&SD.L.pav!=null&&SD.R.pav!=null&&isFinite(AL.prof(AL.S0))){const cr=PRJ.corridor,cs=cr.crown_slope,L=SD.L,R=SD.R,ze=(r,a,p)=>r+.22+.02*(a-p);
+    // the crown is drawn, not read, so keep it just above the finished-grade surface wherever that is higher
+    const lift=(s,o,e)=>{const q=AL.so2xz(s,o),g=fgAt(q.x,q.z);return isFinite(g)?Math.max(e,g+.06):e;};
+    const crown=s=>{const r=AL.prof(s);return[-L.pav,-L.pav/2,0,R.pav/2,R.pav].map(o=>[o,lift(s,o,r-cs*Math.abs(o)+.06)]);};
     O.road3.asph=sweepCL(AL.S0,AL.L,5,crown,mAsph);O.road3.base=sweepCL(AL.S0,AL.L,5,crown,mBase);
     O.road3.stripes=new T.Group();O.road3.stripes.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s)+.09;return[[-.55,r],[-.2,r]];},mStripe),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s)+.09;return[[.2,r],[.55,r]];},mStripe));
-    O.road3.curbs=new T.Group();O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[hw,r-.25],[hw,r+.22],[hw+cr.curb_width,r+.24]];},mCurb),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-hw-cr.curb_width,r+.24],[-hw,r+.22],[-hw,r-.25]];},mCurb));
-    O.road3.walks=new T.Group();O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[cr.walk_inner,ze(r,cr.walk_inner)+.07],[cr.walk_outer,ze(r,cr.walk_outer)+.07]];},mWalk),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-cr.walk_outer,ze(r,cr.walk_outer)+.07],[-cr.walk_inner,ze(r,cr.walk_inner)+.07]];},mWalk));
+    O.road3.curbs=new T.Group();
+    if(R.back!=null)O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[R.pav,r-.25],[R.pav,r+.22],[R.back,r+.24]];},mCurb));
+    if(L.back!=null)O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-L.back,r+.24],[-L.pav,r+.22],[-L.pav,r-.25]];},mCurb));
+    O.road3.walks=new T.Group();
+    if(R.wi!=null&&R.wo!=null)O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[R.wi,ze(r,R.wi,R.pav)+.07],[R.wo,ze(r,R.wo,R.pav)+.07]];},mWalk));
+    if(L.wi!=null&&L.wo!=null)O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-L.wo,ze(r,L.wo,L.pav)+.07],[-L.wi,ze(r,L.wi,L.pav)+.07]];},mWalk));
     O.road3.asph.userData=O.road3.base.userData={kind:'ground'};
     O.staLabels=new T.Group();for(let s=Math.ceil(AL.S0/100)*100;s<=AL.L;s+=100){const p=AL.so2xz(s,0),sp=label(sta(s),{fg:'#ff9cc5',h:.026});sp.position.set(p.x,wy(AL.prof(s))+2,p.z);O.staLabels.add(sp);}
     SITE.add(O.road3.asph,O.road3.base,O.road3.stripes,O.road3.curbs,O.road3.walks,O.staLabels);}
@@ -594,7 +607,9 @@ function setRealistic(on){scene.background=on?skyTex:BG;scene.fog.color.set(on?0
 function homePose(){const asp=Math.max(.45,camera.aspect),r=O.radius||300,dist=(asp<1?r*1.7/asp:r*1.7),dir=V3(-.5,.62,.6).normalize();return{p:O.center.clone().addScaledVector(dir,Math.min(dist,r*4)),t:O.center.clone()};}
 function flyTo(t,p,dur=900){if(st.fps)leaveFps();st.tween={t0:controls.target.clone(),p0:camera.position.clone(),t1:t.clone(),p1:p.clone(),s:performance.now(),dur:reduceMotion?1:dur};}
 function flyHome(){const h=homePose();flyTo(h.t,h.p);}
-function flyToObj(id,scale=1){const ms=U.byId[id];if(!ms||!ms.length)return;const b=new T.Box3();ms.forEach(m=>b.expandByObject(m));const c=b.getCenter(V3()),r=Math.max(18,b.getSize(V3()).length()*.8)*scale;
+function flyToObj(id,scale=1){const ro=roadObj(id);if(ro&&AL){const s=ro.station_from!=null?(ro.station_from+ro.station_to)/2:(AL.S0+AL.L)/2,d=ro.side?(ro.side==='L'?-1:1)*(ro.offset.value||0):0,p=AL.so2xz(s,d),y=wy(isFinite(AL.prof(s))?AL.prof(s):BASE);
+    flyTo(V3(p.x,y,p.z),V3(p.x-40,y+45,p.z+55));return;}
+  const ms=U.byId[id];if(!ms||!ms.length)return;const b=new T.Box3();ms.forEach(m=>b.expandByObject(m));const c=b.getCenter(V3()),r=Math.max(18,b.getSize(V3()).length()*.8)*scale;
   const dir=camera.position.clone().sub(controls.target);dir.y=0;if(dir.lengthSq()<1)dir.set(-1,0,1);dir.normalize();flyTo(c,c.clone().add(V3(dir.x*r*1.3,r*1.05,dir.z*r*1.3)));}
 function enterFps(pos,yaw,pitch){st.fps=true;controls.enabled=false;st.tween=null;camera.position.copy(pos);st.yaw=yaw;st.pitch=pitch;}
 function leaveFps(){st.fps=false;st.drive=null;controls.enabled=true;camera.rotation.set(0,0,0);}
@@ -607,7 +622,7 @@ function setMode(m){if(st.sim&&m!=='operator')endSim(true);st.mode=m;document.qu
   if(m==='bird'){st.xray=false;if(st.fps)leaveFps();flyHome();}
   else if(m==='xray'){st.xray=true;if(st.stage<4)setStage(7,true);if(st.fps)leaveFps();flyHome();}
   else if(m==='finished'){st.xray=false;setStage(7,true);if(st.fps)leaveFps();const h=homePose();flyTo(h.t,h.t.clone().add(V3(-O.radius*.7,O.radius*.32,O.radius*.8)),1200);}
-  else if(m==='walk'){st.xray=false;if(st.stage<3)setStage(7,true);let p;if(AL)p=AL.so2xz(AL.S0+8,-(PRJ.corridor?PRJ.corridor.walk_inner+2.5:20));else p={x:O.center.x-O.radius*.5,z:O.center.z};
+  else if(m==='walk'){st.xray=false;if(st.stage<3)setStage(7,true);let p;const sw=(sides()||{L:{}}).L;if(AL)p=AL.so2xz(AL.S0+8,-(sw.wi!=null?sw.wi+2.5:sw.pav!=null?sw.pav+4:20));else p={x:O.center.x-O.radius*.5,z:O.center.z};
     const pos=V3(p.x,wy(groundAt(p.x,p.z))+5.5,p.z);enterFps(pos,lookYaw(pos,O.center),-.04);}
   else if(m==='operator'){if(!exc){toast('No pipe with elevations to dig yet');setMode('bird');return;}st.xray=false;if(st.stage<4)setStage(4,true);exc.updateMatrixWorld(true);const cab=exc.localToWorld(exc.userData.cab.clone()),tg=exc.userData.tgt;
     enterFps(cab,lookYaw(cab,tg),Math.atan2(tg.y-cab.y,Math.hypot(tg.x-cab.x,tg.z-cab.z)));const p=PIPES.find(p=>p.id===exc.userData.pipe);if(p)startSim(p,false);}
@@ -645,12 +660,12 @@ function pick(cx,cy){const r=canvas.getBoundingClientRect();ndc.set((cx-r.left)/
 function select(id,opts={}){st.sel=id;stake.visible=false;editing=null;applyGlow();renderInspect();if(opts.fly)flyToObj(id,opts.scale||1);if(opts.open!==false)openTab('inspect');
   const s=sysOf(id),o=getObj(id);if(s&&!Lon[s]){Lon[s]=true;applyVis();}const above=o&&['FH','TX'].includes(o.kind);
   if(s&&!above&&!underVis(s))setStage(7);if(s&&!above&&!st.xray&&!st.fps&&!st.sim)setXray(true);}
-function getObj(id){return S[id]||PIPES.find(p=>p.id===id)||LINES[id]||null;}
+function getObj(id){return S[id]||PIPES.find(p=>p.id===id)||LINES[id]||roadObj(id)||null;}
 function pill(stt,conf){const m={verified:['v','Verified'],user:['u','✓ Confirmed'],ai:['ai','AI '+Math.round((conf||0)*100)+'%'],missing:['mi','Missing'],calc:['ca','Calculated']}[stt]||['ca',stt];return`<span class="pill ${m[0]}">${m[1]}</span>`;}
 function srcTxt(f){if(!f||!f.source)return'';return f.source+(f.page!=null?` · p.${f.page+1}`:'');}
 function srcBtn(f){return f&&f.document_id&&f.page!=null&&f.bbox?`<button class="btn sm" data-act="src" data-doc="${f.document_id}" data-page="${f.page}" data-bbox="${f.bbox.join(',')}">Sheet</button>`:'';}
 function factRow(o,f,k,valTxt){const fact=o[f];const stt=fact.status;
-  if(editing&&editing.id===o.id&&editing.f===f){const isNum=['rim','inv_up','inv_dn','cover','dia_in'].includes(f);
+  if(editing&&editing.id===o.id&&editing.f===f){const isNum=['rim','inv_up','inv_dn','cover','dia_in','offset'].includes(f);
     return`<div class="f"><span class="k">${k}</span><input id="edIn" ${isNum?'type="number" inputmode="decimal" step="0.01"':''} value="${esc(fact.value??'')}"><div class="meta"><span class="src">Your value replaces the plan reading</span><button class="btn sm" data-act="cancel">Cancel</button><button class="btn sm pri" data-act="save" data-id="${o.id}" data-f="${f}">Save</button></div></div>`;}
   const act=stt==='ai'?`<button class="btn sm" data-act="confirm" data-id="${o.id}" data-f="${f}">Confirm</button><button class="btn sm" data-act="edit" data-id="${o.id}" data-f="${f}">Correct</button>`:
     stt==='missing'?`<button class="btn sm pri" data-act="edit" data-id="${o.id}" data-f="${f}">Enter value</button>`:`<button class="btn sm" data-act="edit" data-id="${o.id}" data-f="${f}">Edit</button>`;
@@ -662,12 +677,19 @@ const EMPTY=`<div class="empty"><svg viewBox="0 0 48 48" fill="none" stroke="cur
 let editing=null;
 function renderInspect(){const box=$('#pInspect');const id=st.sel;if(!id||!PRJ){box.innerHTML=EMPTY;return;}
   if(id.startsWith('GP:')){const[,x,z]=id.split(':').map(Number);const e=egAt(x,z),p=fgAt(x,z),dz=p-e;
-    let zone='';if(AL){const o=AL.xz2so(x,z),a=Math.abs(o.d),cr=PRJ.corridor;if(cr&&o.s>=AL.S0&&o.s<=AL.L)zone=a<=cr.pavement_half_width?'Roadway pavement':a<=cr.pavement_half_width+cr.curb_width?'Curb & gutter':a<cr.walk_inner?'Tree lawn':a<=cr.walk_outer?'Sidewalk':'Lot / grading';}
+    let zone='',zside=null;const SD=sides();if(AL&&SD){const o=AL.xz2so(x,z),a=Math.abs(o.d),sd=o.d<0?SD.L:SD.R;zside=o.d<0?'L':'R';
+      if(o.s>=AL.S0&&o.s<=AL.L&&sd.pav!=null)zone=a<=sd.pav?'Roadway pavement':sd.back!=null&&a<=sd.back?'Curb & gutter':sd.wi!=null&&a<sd.wi?'Parkway':sd.wi!=null&&sd.wo!=null&&a<=sd.wo?'Sidewalk':'Outside the road';}
     box.innerHTML=`<div class="ih"><span class="sw" style="background:var(--accent)"></span><div><h3>Grade check</h3><p>${esc(zone||where(x,z))}</p></div></div>
       ${isFinite(dz)?`<div class="stake"><small>${dz<0?'Cut':'Fill'}</small>${dz<0?'C':'F'}${Math.abs(dz).toFixed(1)}</div>`:''}
       <div class="fields">${calcRow('Location',where(x,z))}${isFinite(e)?calcRow('Existing grade (EG)',e.toFixed(2),'Surface from '+esc(PRJ.existing.source||'plans')):`<div class="f"><span class="k">Existing grade</span><span class="val">—</span><div class="meta">${pill('missing')}<span class="src">No existing surface here</span></div></div>`}
       ${isFinite(p)?calcRow('Finished grade (FG)',p.toFixed(2),'Surface from '+esc(PRJ.proposed.source||'plans')):`<div class="f"><span class="k">Finished grade</span><span class="val">—</span><div class="meta">${pill('missing')}<span class="src">No finished surface here</span></div></div>`}
-      ${zone==='Roadway pavement'&&PRJ.corridor?factRow({id:'corr',pavement_section:PRJ.corridor.pavement_section},'pavement_section','Pavement section').replace(/<button class="btn sm" data-act="edit".*?<\/button>/,''):''}</div>`;return;}
+      ${zone==='Roadway pavement'&&PRJ.corridor?(roadObj(PRJ.corridor.id)?factRow(PRJ.corridor,'pavement_section','Pavement section'):factRow({id:'corr',pavement_section:PRJ.corridor.pavement_section},'pavement_section','Pavement section').replace(/<button class="btn sm" data-act="edit".*?<\/button>/,'')):''}
+      ${zone&&zside&&PRJ.corridor&&PRJ.corridor.edges?PRJ.corridor.edges.filter(e=>e.side===zside).map(e=>factRow(e,'offset',EDGE_NAME[e.kind]+' '+e.side+'T',e.offset.value!=null?e.offset.value.toFixed(2)+' ft':null)).join(''):''}</div>`;return;}
+  const ro=roadObj(id);if(ro){const cr=PRJ.corridor,isSec=ro===cr;
+    box.innerHTML=`<div class="ih"><span class="sw" style="background:#8f8b80"></span><div><h3>${isSec?'Pavement section':esc(EDGE_NAME[ro.kind]+' '+ro.side+'T')}</h3><p>${esc(PRJ.alignment?PRJ.alignment.name:'')}${isSec?'':` · Sta ${sta(ro.station_from)} to ${sta(ro.station_to)}`}</p></div></div>
+      <div class="fields">${isSec?factRow(cr,'pavement_section','Layers, top down'):factRow(ro,'offset','Offset from centerline',ro.offset.value!=null?ro.offset.value.toFixed(2)+' ft '+ro.side+'T':null)}
+      ${isSec?'':calcRow('Named from',ro.named_by==='label'?'A label on the plan':'Its order outward from the centerline','Confirm or correct it if the plan says otherwise')}
+      ${cr.crown_slope_assumed?calcRow('Cross slope',(cr.crown_slope*100).toFixed(1)+'%','Assumed for drawing only; not read from the plans','assumed'):''}</div>`;return;}
   if(id.startsWith('LOT-')){const h=PRJ.buildings.find(b=>b.id===id);if(!h){box.innerHTML=EMPTY;return;}box.innerHTML=`<div class="ih"><span class="sw" style="background:#b8a58c"></span><div><h3>Lot ${h.lot}</h3><p>${where(h.x,h.z)}</p></div></div><div class="fields">${factRow(h,'ffe','Finished floor (FFE)',h.ffe.value?.toFixed(2)).replace(/<button class="btn sm" data-act="edit".*?<\/button>/,'')}${calcRow('Pad grade',h.pad.toFixed(2))}</div>`;return;}
   const o=getObj(id);if(!o){box.innerHTML=EMPTY;return;}
   if(PIPES.includes(o)){const c=AN.pipes[o.id]||{};const low=c.min_cover!=null&&c.min_cover<3;

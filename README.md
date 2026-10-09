@@ -55,7 +55,7 @@ cd services/api && pytest
 
 `test_geometry.py`, `test_extraction.py` and the parser tests in `test_landxml.py` need only numpy/scipy/pydantic. `test_pdf_and_api.py` runs the real PDF reader and the HTTP API end to end on the sample plan set (skipped if PyMuPDF or FastAPI isn't installed).
 
-Regenerate the samples with `python scripts/make_sample_plans.py` (needs reportlab and matplotlib) and `python scripts/make_sample_landxml.py`.
+The sample set includes two roadway sheets drawn the way CAD exports them: C-6.0 with labels and structures, and C-6.1 rotated, with no structures or edge labels, which can only be placed through its matchline. Regenerate the samples with `python scripts/make_sample_plans.py` (needs reportlab and matplotlib) and `python scripts/make_sample_landxml.py`.
 
 ## How plan interpretation works
 
@@ -66,12 +66,14 @@ Regenerate the samples with `python scripts/make_sample_plans.py` (needs reportl
    * Vector geometry: line segments with width and dash style, small closed symbols (structures), polylines (contours).
    * Labelled values: structure IDs (CB-4, SMH-2 …), RIM, INV IN/OUT with direction, pipe callouts (`31 LF 15" RCP @ 1.00%`), spot elevations (FG, BC, FL, EG …), contour labels, stations.
    * Labels are grouped with the nearest structure ID; structure IDs are snapped to the nearest symbol of the expected shape.
+   * Roadway sheets (and any plan sheet with station labels): line work is chained back into whole lines (CAD plots dashed and center linetypes as hundreds of separate dashes, and arcs as curves), and station labels (`STA 10+00` or bare `10+00`), edge labels (EP, BC, SIDEWALK, R/W …), matchlines (`MATCHLINE STA 3+00 / SEE SHEET C-6.1`) and pavement layers (`1-1/2" HMA SURFACE COURSE`) are read. Profile grids aren't read as contours.
    * Scanned pages: OpenCV line/symbol detection plus the vision model (if enabled).
 3. **Assembly** (`gv/ingest/assemble.py`):
    * Plan sheets with a known scale are converted to feet and **registered into one coordinate frame** through the structures they share (least-squares similarity fit). Scale mismatches and poor fits are reported.
    * Structures are merged across sheets. Elevations come only from printed text. When the plan and profile agree, the value is marked **verified**; a single reading stays **AI** with a confidence; disagreements are flagged with both readings.
    * Pipes come from thick plan line work connecting two structures. Inverts are matched by IN/OUT and compass side (e.g. `INV IN (W)`). Sizes/materials come from the nearest callout on the plan or between the two structures on the profile. Stated slope is checked against the inverts.
    * Existing and finished surfaces are triangulated (TIN) from labelled contours (dashed = existing, solid = proposed) and spot elevations.
+   * **Roadway** (`gv/ingest/roadway.py`): the centerline is the line along which the station labels fit one consistent stationing, with road edges on both sides at irregular offsets (which rules out profile grids). The fit measures the scale, so a half-size print or a wrong scale note is reported, and a sheet with no scale gets one. Edges are lines at a constant offset from the centerline, named from labels, or from their order outward (pavement, curb, sidewalk) at lower confidence when there are no labels; dashed lines are never named by order. Roadway sheets that share no structures are placed through their matchline: same station, same point, same direction. Each edge (`EP-LT`, `BC-RT`, `SW-IN-LT` …) and the pavement section are values to confirm or correct like any other. Centerline elevations are sampled from the finished-grade surface (marked calculated); the 2% crown is assumed for drawing only.
    * Nothing missing is filled in. Missing values become issues that say what sheet or information is needed.
 4. **Validation** (`gv/geometry/validate.py`): inverts above rims, adverse slopes, low cover, rims that don't match finished grade, elevation outliers (datum or misread digit), duplicate IDs.
 5. **Analysis** (`gv/analysis.py`): slopes, cover, depths, utility crossings with vertical clearance, earthwork (cut/fill in CY with covered area), review list, status counts.
@@ -133,13 +135,15 @@ Working now:
 * Time Machine, bird's-eye, walk, operator, X-ray, finished, road-driving (when a roadway alignment exists)
 * Manual correction with replay, calibration and datum controls, source-sheet crops
 * LandXML TIN surface import, with roles, a false origin, and a cross-check against plan contours
+* Roadway from plan sheets: centerline and stationing, pavement / curb / sidewalk / R/W edges per side, pavement section, sheets joined at matchlines
 * Assistant grounded in the extracted data, with sheet references
 
 Not yet extracted from uploaded plans (the demo project shows how they'll look):
-* Roadway pavement, curb and gutter, sidewalks, driveways, parking lots, trails (need edge-of-pavement linework classification and the typical section)
+* Driveways, parking lots, trails, intersections and curb returns; more than one road per project; widths that change along the road (one width per side is modeled, and differences are flagged)
+* Road profiles from the profile half of plan & profile sheets (centerline elevations come from the finished-grade surface), and cross slope from typical sections
 * Retaining walls, building footprints and foundations
 * Water and sewer mains drawn as continuous lines without labelled structures
 * Cross-section sheets, and linking profiles to plans by stationing (today they link by structure ID)
 * DXF and IFC import; LandXML alignments, profiles and pipe networks (surfaces are imported)
 
-Suggested next steps, in order: pavement edge extraction from roadway sheets, station-based plan/profile linking, a calibration UI with click-to-place control points, then the React Three Fiber migration of `apps/web`.
+Suggested next steps, in order: run real plan sets through and fix what they expose (the reader has so far been tested on generated samples, which can't show every firm's drafting habits), reading road profiles from plan & profile sheets by station, a calibration UI with click-to-place control points, then the React Three Fiber migration of `apps/web`.

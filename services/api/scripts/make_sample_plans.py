@@ -39,6 +39,8 @@ FONT = "Helvetica"
 
 
 class Sheet:
+    scale_ft = 40
+
     def __init__(self, c: canvas.Canvas, number: str, title: str, origin=(100, 120), scale=True):
         self.c, self.number, self.title, self.ox, self.oy = c, number, title, origin[0], origin[1]
         self.rec = {"w": W, "h": H, "spans": [], "segs": [], "symbols": [], "polys": []}
@@ -97,9 +99,105 @@ class Sheet:
         self.text(bx + 16, by + 60, "SAMPLE PLAN SET - GENERATED FROM DEMO DATA", 7)
         self.text(bx + 16, by + 110, self.title, 14)
         if scale:
-            self.text(bx + 16, by + 135, "SCALE: 1\" = 40'", 9)
+            self.text(bx + 16, by + 135, f"SCALE: 1\" = {self.scale_ft:g}'", 9)
         self.text(bx + 16, by + 165, "VERTICAL DATUM: NAVD88", 7)
         self.text(bx + 380, by + 190, self.number, 22)
+
+
+class RoadSheet(Sheet):
+    """A roadway plan at its own scale, optionally rotated, drawn the way CAD exports it."""
+
+    def __init__(self, c, number, title, scale_ft, center_ft, center_pt, rot_deg=0.0):
+        self.scale_ft, self.k = scale_ft, scale_ft / 72
+        self.cx, self.cz, self.px, self.py = *center_ft, *center_pt
+        self.cos, self.sin = math.cos(math.radians(rot_deg)), math.sin(math.radians(rot_deg))
+        super().__init__(c, number, title)
+
+    def P(self, x_ft, z_ft):
+        dx, dz = x_ft - self.cx, z_ft - self.cz
+        return self.px + (self.cos * dx - self.sin * dz) / self.k, self.py + (self.sin * dx + self.cos * dz) / self.k
+
+    def dash_segments(self, pts, pattern, width):
+        """A dashed linetype as separate short lines, the way AutoCAD plots one."""
+        P = np.asarray(pts, float)
+        T = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+        t, i = 0.0, 0
+        while t < T[-1]:
+            on = pattern[i % len(pattern)]
+            if i % 2 == 0:
+                a, b = t, min(t + on, T[-1])
+                if b - a > 0.2:
+                    self.line(np.interp(a, T, P[:, 0]), np.interp(a, T, P[:, 1]), np.interp(b, T, P[:, 0]), np.interp(b, T, P[:, 1]), width)
+            t += on
+            i += 1
+
+    def curve(self, pts, width):
+        """A smooth line as Bezier curves (Catmull-Rom through the points)."""
+        self.c.setLineWidth(width)
+        self.c.setDash()
+        P = [np.array(q, float) for q in pts]
+        path = self.c.beginPath()
+        path.moveTo(P[0][0], H - P[0][1])
+        for i in range(len(P) - 1):
+            p0, p1, p2, p3 = P[max(0, i - 1)], P[i], P[i + 1], P[min(len(P) - 1, i + 2)]
+            c1, c2 = p1 + (p2 - p0) / 6, p2 - (p3 - p1) / 6
+            path.curveTo(c1[0], H - c1[1], c2[0], H - c2[1], p2[0], H - p2[1])
+        self.c.drawPath(path, stroke=1, fill=0)
+
+
+def arc_stationing(al):
+    """Demo centerline restationed by true arc length, as CAD stations an alignment."""
+    p = np.linspace(al.s[0], al.s[-1], 4000)
+    x, z = al.to_xz(p, 0.0)
+    arc = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(z)))])
+    return lambda st: (float(np.interp(st, arc, x)), float(np.interp(st, arc, z))), float(arc[-1])
+
+
+def road_sheet(c, number, title, s0, s1, scale_ft, rot, al, S, structures, labels, match, section=None):
+    at, _ = arc_stationing(al)
+    mid = at((s0 + s1) / 2)
+    sh = RoadSheet(c, number, title, scale_ft, mid, (620, 520), rot)
+    ss = np.arange(s0, s1 + 0.01, 2.0)
+
+    def off_pts(d):
+        out = []
+        for st in ss:
+            (xa, za), (xb, zb) = at(st - 0.5), at(st + 0.5)
+            tx, tz = xb - xa, zb - za
+            n = math.hypot(tx, tz)
+            x, z = at(st)
+            out.append(sh.P(x - tz / n * d, z + tx / n * d))
+        return out
+
+    sh.dash_segments(off_pts(0), [24, 4, 4, 4], 0.35)  # center linetype, dash by dash
+    for d in (-14, 14):
+        sh.poly(off_pts(d)[::3], 0.6)
+    for d in (-15, 15):
+        sh.curve(off_pts(d)[::10], 0.6)
+    for d in (-18, -23, 18, 23):
+        sh.poly(off_pts(d)[::3], 0.45)
+    for d in (-30, 30):
+        sh.poly(off_pts(d)[::3], 0.35, (10, 3))  # phantom R/W line, a real PDF dash pattern
+    for st in np.arange(math.ceil(s0 / 50) * 50, s1 + 0.01, 50):  # ticks and station labels
+        p1, p2 = off_pts(-2.5)[int((st - s0) / 2)], off_pts(2.5)[int((st - s0) / 2)]
+        sh.line(*p1, *p2, 0.35)
+        lx, ly = off_pts(-6.5)[int((st - s0) / 2)]
+        sh.text(lx, ly, ("STA " if st == 0 else "") + f"{int(st // 100)}+{int(st % 100):02d}", 6, center=True)
+    for txt, d, st in labels:  # edge labels sit on their line
+        x, y = off_pts(d)[int((st - s0) / 2)]
+        sh.text(x, y + 2, txt, 5.5, center=True)
+    for sid in structures:
+        px, py = sh.P(S[sid].x, S[sid].z)
+        sh.rect_symbol(px, py, 6)
+        sh.text(px + 7, py - 6, sid, 6)
+    ma, mb = off_pts(-34)[int((match[0] - s0) / 2)], off_pts(34)[int((match[0] - s0) / 2)]
+    sh.line(*ma, *mb, 1.2, (12, 4))
+    sh.text(mb[0] + 6, mb[1] + 8, f"MATCHLINE STA {int(match[0] // 100)}+{int(match[0] % 100):02d}", 7)
+    sh.text(mb[0] + 6, mb[1] + 18, f"SEE SHEET {match[1]}", 7)
+    if section:
+        for i, t in enumerate(["PAVEMENT SECTION (TYPICAL)"] + section):
+            sh.text(140, 1000 + i * 11, t, 7)
+    return sh
 
 
 def contour_paths(grid: Grid, levels):
@@ -112,6 +210,12 @@ def contour_paths(grid: Grid, levels):
                 out.append((float(lvl), seg))
     plt.close("all")
     return out
+
+
+def _demo_alignment():
+    from gv.geometry.alignment import Alignment
+    a = build_demo().alignment
+    return Alignment([p.s for p in a.points], [p.x for p in a.points], [p.z for p in a.points])
 
 
 def main(out_dir: Path):
@@ -127,7 +231,8 @@ def main(out_dir: Path):
     sh = Sheet(c, "C-0.0", "COVER SHEET AND SHEET INDEX", scale=False)
     sh.text(160, 200, "MAPLE RIDGE PHASE 1 - SITE IMPROVEMENT PLANS", 26)
     for i, (n, t) in enumerate([("C-0.0", "COVER SHEET"), ("C-3.0", "GRADING PLAN"), ("C-4.0", "STORM DRAINAGE PLAN"),
-                                ("C-4.1", "STORM PROFILES"), ("C-5.0", "SANITARY SEWER PLAN")]):
+                                ("C-4.1", "STORM PROFILES"), ("C-5.0", "SANITARY SEWER PLAN"),
+                                ("C-6.0", "ROADWAY PLAN STA 0+00 TO 3+00"), ("C-6.1", "ROADWAY PLAN STA 3+00 TO END")]):
         sh.text(160, 300 + i * 24, f"{n}   {t}", 12)
     layouts.append(sh.rec)
     c.showPage()
@@ -267,6 +372,20 @@ def main(out_dir: Path):
     a, b = S["CB-4"], S["CB-5"]
     (x0, y0), (x1, y1) = sh.P(a.x, a.z), sh.P(b.x, b.z)
     sh.line(x0, y0, x1, y1, 0.5, (2, 2))
+    layouts.append(sh.rec)
+    c.showPage()
+
+    # C-6.0 / C-6.1 roadway plans at 1" = 20': the second rotated, with no structures and no edge labels,
+    # so it can only be placed through its matchline and its edges only named by order -----------------
+    al = _demo_alignment()
+    _, total = arc_stationing(al)
+    on_first = [sid for sid in storm_ids if S[sid].x < -275 + 300 - 10]
+    sh = road_sheet(c, "C-6.0", "ROADWAY PLAN STA 0+00 TO 3+00", 0, 300, 20, 0.0, al, S, on_first,
+                    [("EP", -14, 120), ("BC", 15, 210), ("5' SIDEWALK", -20.5, 170), ("R/W", 30, 90)], (300, "C-6.1"))
+    layouts.append(sh.rec)
+    c.showPage()
+    sh = road_sheet(c, "C-6.1", "ROADWAY PLAN STA 3+00 TO END", 300, math.floor(total), 20, -25.0, al, S, [], [], (300, "C-6.0"),
+                    section=['1-1/2" HMA SURFACE COURSE', '2-1/2" HMA BASE COURSE', '8" AGGREGATE BASE', "SUBGRADE COMPACTED TO 95%"])
     layouts.append(sh.rec)
     c.showPage()
 

@@ -20,6 +20,8 @@ import math
 import re
 from dataclasses import asdict, dataclass, field
 
+from .roadway import chain_segments, edge_label_kind
+
 try:
     import pymupdf as fitz  # PyMuPDF >= 1.24
 except ImportError:  # pragma: no cover
@@ -38,6 +40,14 @@ PIPE = re.compile(r"(?:(\d+(?:\.\d+)?)\s*(?:LF|L\.F\.)\s*(?:OF\s*)?)?(\d{1,2})\s
 SPOT = re.compile(r"\b(FG|TC|BC|FFE|FF|EG|TW|BW|HP|LP|FL|PAD)\s*[=:]?\s*(\d{3,4}\.\d{1,2})\b|\b(\d{3,4}\.\d{1,2})\s*(FG|TC|BC|FFE|FF|EG|TW|BW|FL|PAD)\b", re.I)
 CONTOUR_LABEL = re.compile(r"^\s*(\d{3,4})(?:\.0)?\s*$")
 STATION = re.compile(r"\bSTA\.?\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
+BARE_STATION = re.compile(r"^\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)\s*$")  # tick labels along a centerline
+MATCHLINE = re.compile(r"MATCH\s*-?\s*LINE\b[^+]{0,20}?(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
+SEE_SHEET = re.compile(r"SEE\s+(?:SHEET|SHT\.?|DWG\.?)\s*([CEALSUG])-?\s?(\d{1,2}\.\d{1,2})", re.I)
+PAVE_LAYER = re.compile(r"(\d+(?:\.\d+)?(?:[\s-]\d/\d|½)?|\d/\d|½)\s*(?:\"|”|IN\.?|INCH(?:ES)?)\s*(?:THICK\s+)?(?:OF\s+)?"
+                        r"((?:HOT[\s-]MIX\s+)?ASPHALT(?:IC)?(?:\s+CONCRETE)?(?:\s+(?:SURFACE|BASE|BINDER|INTERMEDIATE)(?:\s+COURSE)?)?"
+                        r"|HMA(?:\s+(?:SURFACE|BASE|BINDER|INTERMEDIATE)(?:\s+COURSE)?)?|A\.?C\.?(?=\s|$|,)|P\.?C\.?C\.?"
+                        r"|(?:PORTLAND\s+CEMENT\s+)?CONCRETE(?:\s+PAVEMENT)?|(?:CRUSHED\s+)?AGGREGATE\s+(?:SUB)?BASE(?:\s+COURSE)?"
+                        r"|CLASS\s+\w+\s+(?:AGGREGATE\s+)?(?:SUB)?BASE|A\.?B\.?(?=\s|$|,)|C?ABC|SUB-?BASE|GRAVEL\s+BASE|CRUSHED\s+(?:STONE|ROCK)(?:\s+BASE)?)", re.I)
 
 CATEGORIES = [
     ("existing", ["EXISTING CONDITIONS", "TOPOGRAPHIC", "SURVEY", "EXISTING SITE"]),
@@ -57,6 +67,8 @@ CATEGORIES = [
     ("landscape", ["LANDSCAPE", "PLANTING"]),
     ("cover", ["COVER", "INDEX", "TITLE SHEET"]),
 ]
+CURVE_STEPS = 6
+ROAD_CATEGORIES = {"roadway"}  # plus any plan sheet with station labels
 PLAN_CATEGORIES = {"grading", "storm", "sanitary", "water", "utility", "roadway", "site", "existing"}
 PROFILE_CATEGORIES = {"storm_profile", "sanitary_profile"}
 
@@ -131,6 +143,7 @@ class SheetReport:
     text_spans: int
     candidates: list[Candidate] = field(default_factory=list)
     pipe_segments: list[list[float]] = field(default_factory=list)  # thick plan lines [x0,y0,x1,y1]
+    linework: list[dict] = field(default_factory=list)  # chained lines on roadway sheets: {pts, w, dashed, len}
     symbols: list[list[float]] = field(default_factory=list)  # [x, y, size, kind(0 rect/1 circle)]
     notes: list[str] = field(default_factory=list)
 
@@ -192,11 +205,19 @@ def _geometry(page):
                     pts = [(p1.x, p1.y)]
                 pts.append((p2.x, p2.y))
             elif it[0] == "c":
-                p1, p4 = it[1], it[4]
-                segs.append(Seg(p1.x, p1.y, p4.x, p4.y, width, dashed))
-                if not pts:
+                p1, c1, c2, p4 = it[1], it[2], it[3], it[4]
+                if not pts or (abs(pts[-1][0] - p1.x) > 0.01 or abs(pts[-1][1] - p1.y) > 0.01):
+                    if len(pts) >= 2:
+                        polys.append(Polyline(pts, width, dashed))
                     pts = [(p1.x, p1.y)]
-                pts.append((p4.x, p4.y))
+                prev = (p1.x, p1.y)
+                for k in range(1, CURVE_STEPS + 1):  # follow the curve, not its chord
+                    t = k / CURVE_STEPS
+                    a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t * t, t ** 3
+                    q = (a * p1.x + b * c1.x + c * c2.x + d * p4.x, a * p1.y + b * c1.y + c * c2.y + d * p4.y)
+                    segs.append(Seg(prev[0], prev[1], q[0], q[1], width, dashed))
+                    pts.append(q)
+                    prev = q
         if len(pts) >= 2:
             polys.append(Polyline(pts, width, dashed))
     return segs, symbols, polys
@@ -267,6 +288,11 @@ def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: li
             thick = max(1.2, widths[int(len(widths) * 0.9)] * 0.95)
             report.pipe_segments = [[s.x0, s.y0, s.x1, s.y1] for s in segs if s.width >= thick and not s.dashed and s.length > 8]
     report.symbols = [[s.x, s.y, s.size, 1 if s.kind == "circle" else 0] for s in symbols]
+    # roadway linework: chained so CAD dash-by-dash linetypes become whole lines again
+    n_sta = sum(1 for c in report.candidates if c.kind == "station")
+    if category in ROAD_CATEGORIES or (category in PLAN_CATEGORIES and n_sta >= 2):
+        lines = chain_segments([(s.x0, s.y0, s.x1, s.y1, s.width, s.dashed) for s in segs], min_len=max(60.0, size_ref * 2.5))
+        report.linework = sorted(lines, key=lambda l: -l["len"])[:600]
     if category in PLAN_CATEGORIES and not scale:
         report.notes.append("Plan sheet without a readable scale. Set the scale before using its geometry.")
     return report
@@ -333,7 +359,26 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[
         c.confidence = round(min(found), 2) if found else 0.3
 
     out: list[Candidate] = list(structs)
+    roadish = category in ROAD_CATEGORIES or category in PLAN_CATEGORIES
     for s in spans:
+        if roadish:
+            m = MATCHLINE.search(s.text)
+            if m:
+                ref = SEE_SHEET.search(s.text) or next((SEE_SHEET.search(o.text) for o in spans if o is not s and abs(o.x - s.x) < size_ref * 6
+                                                        and 0 <= o.y - s.y < size_ref * 2 and SEE_SHEET.search(o.text)), None)
+                out.append(Candidate("matchline", m.group(0), {"station": int(m.group(1)) * 100 + float(m.group(2)),
+                                                               "sheet_ref": f"{ref.group(1).upper()}-{ref.group(2)}" if ref else None}, page, s.x, s.y, bb(s), s.text, 0.9))
+                continue
+            m = BARE_STATION.match(s.text)
+            if m and not STATION.search(s.text):
+                out.append(Candidate("station", s.text.strip(), {"station": int(m.group(1)) * 100 + float(m.group(2))}, page, s.x, s.y, bb(s), s.text, 0.8))
+            if len(s.text) <= 30:
+                k = edge_label_kind(s.text)
+                if k:
+                    out.append(Candidate("road_label", k, {"size": round(s.size, 2)}, page, s.x, s.y, bb(s), s.text, 0.8))
+        for m in PAVE_LAYER.finditer(s.text):
+            out.append(Candidate("pavement_layer", m.group(0).strip(), {"thickness_in": _inches(m.group(1)), "material": " ".join(m.group(2).upper().split())},
+                                 page, s.x, s.y, bb(s), s.text, 0.75))
         for m in PIPE.finditer(s.text):
             out.append(Candidate("pipe_callout", m.group(0).strip(), {
                 "length_lf": float(m.group(1)) if m.group(1) else None, "dia_in": float(m.group(2)),
@@ -346,7 +391,8 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[
             out.append(Candidate("station", m.group(0), {"station": int(m.group(1)) * 100 + float(m.group(2))}, page, s.x, s.y, bb(s), s.text, 0.9))
 
     # contour labels: a bare whole-number elevation sitting on a polyline
-    if category in ("grading", "existing", "site", "roadway"):
+    # not roadway sheets: on plan & profile sheets the profile grid's elevation labels sit on grid lines
+    if category in ("grading", "existing", "site"):
         long_polys = [p for p in polys if p.length > size_ref * 3 and len(p.pts) >= 3]
         for s in spans:
             m = CONTOUR_LABEL.match(s.text)
@@ -363,6 +409,20 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[
                     "pts": [[round(x, 2), round(y, 2)] for x, y in best.pts]}, page, s.x, s.y, bb(s), s.text,
                     0.8 if best.dashed or category == "grading" else 0.7))
     return out
+
+
+def _inches(text: str) -> float:
+    """'8', '1.5', '1-1/2', '1 1/2', '1½', '3/4' -> inches."""
+    total = 0.0
+    for part in re.split(r"[\s-]+", text.replace("½", " 1/2").strip()):
+        if not part:
+            continue
+        if "/" in part:
+            a, b = part.split("/")
+            total += float(a) / float(b)
+        else:
+            total += float(part)
+    return total
 
 
 def read_plan_set(data: bytes) -> list[SheetReport]:

@@ -188,6 +188,28 @@ def _compare_surfaces(lx: Grid, plan: Grid, role: str, name: str) -> Issue:
     return Issue(severity="info", code="surface_agreement", message=msg)
 
 
+def _centerline_profile(prj: Project) -> None:
+    """Centerline elevations from the finished-grade surface (calculated), until profiles are linked by station."""
+    if not prj.alignment:
+        return
+    if not prj.proposed:
+        prj.alignment.profile_source = None
+        prj.issues.append(Issue(severity="info", code="no_road_profile", message="The road centerline has no elevations yet: upload the grading plan or a finished-grade surface."))
+        return
+    pts = prj.alignment.points
+    e = Grid.from_model(prj.proposed).sample([p.x for p in pts], [p.z for p in pts])
+    ok = np.isfinite(e)
+    if ok.sum() < 2:
+        prj.issues.append(Issue(severity="warning", code="road_off_surface", message="The road centerline doesn't fall on the finished-grade surface. Check sheet registration."))
+        return
+    s = np.array([p.s for p in pts])
+    filled = np.interp(s, s[ok], e[ok])  # stations off the surface take the nearest known elevation
+    for p, v in zip(pts, filled):
+        p.elev = round(float(v), 2)
+    covered = 100 * ok.mean()
+    prj.alignment.profile_source = "Finished-grade surface along the centerline (calculated)" + (f"; {covered:.0f}% of the centerline is on the surface" if covered < 99 else "")
+
+
 def rebuild_project(db: Session, pid: str) -> Project:
     row = dbm.get_project_row(db, pid)
     prj = Project(**row.model)
@@ -205,6 +227,7 @@ def rebuild_project(db: Session, pid: str) -> Project:
     result = assemble(reports, overrides.get("sheets", {}), prj.datum.elevation_offset_ft, prj.datum.false_origin)
     prj.sheets, prj.structures, prj.pipes = result["sheets"], result["structures"], result["pipes"]
     prj.existing, prj.proposed, prj.issues = result["existing"], result["proposed"], result["issues"]
+    prj.alignment, prj.corridor = result["alignment"], result["corridor"]
     pdf_real_frame = any(c["registered"] and c["transform"] and c["transform"]["n"] >= 2 and c["transform"]["rms"] >= 0 and overrides.get("sheets", {}).get(k, {}).get("control_points")
                          for k, c in result["calibrations"].items())
     if surfaces:
@@ -213,6 +236,7 @@ def rebuild_project(db: Session, pid: str) -> Project:
         prj.datum.horizontal = f"Registered to control points{f' (EPSG:{prj.datum.epsg})' if prj.datum.epsg else ''}"
     elif any(s.used for s in prj.imported_surfaces):
         prj.datum.horizontal = f"LandXML coordinates{f' (EPSG:{prj.datum.epsg})' if prj.datum.epsg else ''}"
+    _centerline_profile(prj)
     for e in dbm.edits_for(db, pid):
         try:
             apply_edit(prj, FieldEdit(**e))
