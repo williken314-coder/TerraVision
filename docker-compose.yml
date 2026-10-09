@@ -1,0 +1,33 @@
+# GroundVision: API + web app, with PostGIS.  `docker compose up --build`, then open http://localhost:8000
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: gv
+      POSTGRES_PASSWORD: gv
+      POSTGRES_DB: groundvision
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gv -d groundvision"]
+      interval: 5s
+      retries: 10
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://gv:gv@db:5432/groundvision
+      GV_DATA_DIR: /data
+      # Optional: enables the vision reader for scanned sheets and open-ended assistant questions
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/data
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  pgdata:
+  uploads:
