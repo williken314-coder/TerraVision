@@ -58,16 +58,24 @@ class Grid:
 class TIN:
     """Triangulated irregular network from spot elevations / contour vertices."""
 
-    def __init__(self, x, z, e):
+    def __init__(self, x, z, e, max_edge: float | None = None):
+        """``max_edge``: drop triangles with a longer side, so the surface doesn't bridge gaps the source never
+        covered (finished-grade contours drawn only inside the work limits, say)."""
         self.pts = np.column_stack([x, z]).astype(float)
         self.e = np.asarray(e, dtype=float)
         self.tri = Delaunay(self.pts)
+        self.dropped = np.zeros(len(self.tri.simplices), bool)
+        if max_edge:
+            P = self.pts[self.tri.simplices]
+            sides = np.linalg.norm(P - np.roll(P, 1, axis=1), axis=2)
+            self.dropped = sides.max(axis=1) > max_edge
 
     def sample(self, x, z):
         q = np.column_stack([np.ravel(x), np.ravel(z)])
         simplex = self.tri.find_simplex(q)
         out = np.full(len(q), np.nan)
         ok = simplex >= 0
+        ok[ok] = ~self.dropped[simplex[ok]]
         T = self.tri.transform[simplex[ok]]
         b = np.einsum("nij,nj->ni", T[:, :2, :], q[ok] - T[:, 2, :])
         bary = np.column_stack([b, 1 - b.sum(axis=1)])

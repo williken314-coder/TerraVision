@@ -296,9 +296,7 @@ def title_block(spans: list[TextSpan], w: float, h: float, common: set[str] | fr
     """
     zone = [s for s in spans if (s.x > w * 0.6 and s.y > h * 0.7) or s.x > w * 0.88]
     own = [s for s in zone if s.text not in common]
-    sizes = sorted(s.size for s in spans)
-    med = sizes[len(sizes) // 2] if sizes else 0
-    ids = [s for s in zone if SHEET_ID.fullmatch(s.text.strip()) and s.size >= med * 1.2 and s.x > w * 0.75 and s.y > h * 0.75]
+    ids = [s for s in zone if SHEET_ID.fullmatch(s.text.strip()) and s.size >= 9 and s.x > w * 0.75 and s.y > h * 0.75]
     sid_span = min(ids, key=lambda s: (-round(s.size), math.hypot(w - s.x, h - s.y)), default=None)
     if sid_span:
         sheet_id = sid_span.text.strip()
