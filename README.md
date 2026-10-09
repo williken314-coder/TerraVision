@@ -1,14 +1,14 @@
 # TerraVision AI
 
-Upload a civil plan set (PDF). TerraVision reads it, builds a 3D model of the jobsite from what is actually printed on the sheets, and flags everything it isn't sure about for a person to confirm.
+Upload a civil plan set (PDF), and optionally the design surfaces (LandXML). TerraVision reads them, builds a 3D model of the jobsite from what is actually printed on the sheets, and flags everything it isn't sure about for a person to confirm.
 
 ```
 apps/web/            The TerraVision interface (Three.js), served by the API at /
 services/api/        Python backend: FastAPI, PDF reading, geometry engine, database
-  gv/ingest/         Plan interpretation pipeline (PyMuPDF, OpenCV, optional vision model)
+  gv/ingest/         Plan interpretation pipeline (PyMuPDF, OpenCV, optional vision model) and LandXML import
   gv/geometry/       Deterministic engineering math (alignments, TIN surfaces, pipes, crossings, earthwork, trenches, checks)
   gv/api.py          HTTP API
-  samples/           A generated sample plan set to test uploads with
+  samples/           A generated sample plan set and LandXML surfaces to test uploads with
   tests/             Test suite
 docker-compose.yml   API + PostGIS
 ```
@@ -29,6 +29,7 @@ Open http://localhost:8000. The **Maple Ridge (demo)** project loads first. To t
 1. Open the **Plans** tab, tap **New**, name a project.
 2. Tap **Upload plan set (PDF)** and pick `services/api/samples/maple-ridge-sample-plans.pdf` (or your own plans).
 3. When processing finishes, the model appears. Every value shows the sheet, page, and the exact text it was read from. Tap **Sheet** next to any value to see that spot on the drawing.
+4. Optionally upload `services/api/samples/maple-ridge-surfaces.xml` (LandXML EG and FG surfaces) to the same project. See [LandXML surfaces](#landxml-surfaces).
 
 ### Docker (PostGIS)
 
@@ -52,9 +53,9 @@ Without a key, everything else works; scanned sheets are reported as unreadable 
 cd services/api && pytest
 ```
 
-`test_geometry.py` and `test_extraction.py` need only numpy/scipy/pydantic. `test_pdf_and_api.py` runs the real PDF reader and the HTTP API end to end on the sample plan set (skipped if PyMuPDF or FastAPI isn't installed).
+`test_geometry.py`, `test_extraction.py` and the parser tests in `test_landxml.py` need only numpy/scipy/pydantic. `test_pdf_and_api.py` runs the real PDF reader and the HTTP API end to end on the sample plan set (skipped if PyMuPDF or FastAPI isn't installed).
 
-> Note: the first version of this code was written in an environment that couldn't install PyMuPDF, FastAPI, or SQLAlchemy. The geometry, assembly, and assistant tests passed there; `test_pdf_and_api.py` gets its first real run on your machine. If anything fails, run `pytest -x` and fix from the top.
+Regenerate the samples with `python scripts/make_sample_plans.py` (needs reportlab and matplotlib) and `python scripts/make_sample_landxml.py`.
 
 ## How plan interpretation works
 
@@ -74,6 +75,17 @@ cd services/api && pytest
    * Nothing missing is filled in. Missing values become issues that say what sheet or information is needed.
 4. **Validation** (`gv/geometry/validate.py`): inverts above rims, adverse slopes, low cover, rims that don't match finished grade, elevation outliers (datum or misread digit), duplicate IDs.
 5. **Analysis** (`gv/analysis.py`): slopes, cover, depths, utility crossings with vertical clearance, earthwork (cut/fill in CY with covered area), review list, status counts.
+
+## LandXML surfaces
+
+Upload a LandXML 1.x file (`.xml`, exported from Civil 3D, OpenRoads, Trimble Business Center, Carlson …) to a project, through the same **Upload** button as plan PDFs.
+
+* **What is read:** TIN surfaces (`<Surface>/<Definition surfType="TIN">`), using the file's own triangles, so breaklines and boundaries are kept and nothing is interpolated outside the surface. Points are read in LandXML order (northing, easting, elevation). Linear units are converted to feet. `<CoordinateSystem epsgCode>` fills in the project EPSG if it is empty.
+* **Which surface is which:** guessed from the name only (`EG`, `Existing`, `OG`, `Topo` → existing ground; `FG`, `Finished`, `Proposed`, `Design` → finished grade). Corridor layers such as `Datum`, `Subgrade` or volume surfaces, and anything unclear, are left unassigned and listed as issues. Pick or change the role in **Plans → Imported surfaces** (`PUT /api/projects/{id}/surfaces`).
+* **Precedence:** an imported surface replaces the one built from plan contours for the same role. When the plan sheets are registered to the same coordinates (control points), the two are compared and the mean difference and RMS are reported. A consistent offset points to a vertical datum difference.
+* **Coordinates:** state plane / UTM values are too large to draw precisely, so the first real-world coordinates a project receives (LandXML or control points) set a **false origin** (`datum.false_origin`, rounded to 1000 ft). Project coordinates are `x = E − E0`, `z = −(N − N0)`. Control points and LandXML use the same origin, so they line up. Coordinate readouts in the app add it back.
+* If the plan sheets are still sheet-local (no control points), the surfaces won't line up with them, and an issue says so.
+* The project's elevation offset (Datum & units) applies to LandXML elevations too.
 
 Every extracted value is a `Fact` with `status` (verified, ai, user, missing), `confidence`, `source` sheet, `page`, `bbox` on the page, and the raw `text`.
 
@@ -97,12 +109,13 @@ Every extracted value is a `Fact` with `status` (verified, ai, user, missing), `
 | GET | `/api/health` | Vision/OpenCV availability |
 | GET/POST | `/api/projects` | List / create |
 | GET/DELETE | `/api/projects/{id}` | Project model + analysis |
-| POST | `/api/projects/{id}/documents` | Upload a PDF (multipart `file`) |
+| POST | `/api/projects/{id}/documents` | Upload a PDF plan set or a LandXML file (multipart `file`) |
 | GET | `/api/documents/{doc}` | Processing status and per-sheet summary |
 | GET | `/api/documents/{doc}/pages/{page}.png?bbox=x0,y0,x1,y1` | Sheet image or crop around a value |
 | PATCH | `/api/projects/{id}/fields` | `{object_id, field, action: confirm|set, value}` |
 | PUT | `/api/projects/{id}/calibration` | Scale or control points for one sheet |
 | PUT | `/api/projects/{id}/datum` | Vertical datum, offset, EPSG |
+| PUT | `/api/projects/{id}/surfaces` | Role of an imported surface: `{document_id, index, role: existing|proposed|ignore}` |
 | GET | `/api/projects/{id}/pipes/{pipe}/trench` | Trench excavation, bedding, backfill quantities |
 | POST | `/api/projects/{id}/ask` | Assistant, `{q, selected}`; answers name their sheets |
 
@@ -119,6 +132,7 @@ Working now:
 * 3D model from extracted data: surfaces, cut/fill heat map, structures, pipes, crossings
 * Time Machine, bird's-eye, walk, operator, X-ray, finished, road-driving (when a roadway alignment exists)
 * Manual correction with replay, calibration and datum controls, source-sheet crops
+* LandXML TIN surface import, with roles, a false origin, and a cross-check against plan contours
 * Assistant grounded in the extracted data, with sheet references
 
 Not yet extracted from uploaded plans (the demo project shows how they'll look):
@@ -126,6 +140,6 @@ Not yet extracted from uploaded plans (the demo project shows how they'll look):
 * Retaining walls, building footprints and foundations
 * Water and sewer mains drawn as continuous lines without labelled structures
 * Cross-section sheets, and linking profiles to plans by stationing (today they link by structure ID)
-* DXF, LandXML and IFC import (LandXML surfaces would be the quickest win)
+* DXF and IFC import; LandXML alignments, profiles and pipe networks (surfaces are imported)
 
-Suggested next steps, in order: LandXML surface import, pavement edge extraction from roadway sheets, station-based plan/profile linking, a calibration UI with click-to-place control points, then the React Three Fiber migration of `apps/web`.
+Suggested next steps, in order: pavement edge extraction from roadway sheets, station-based plan/profile linking, a calibration UI with click-to-place control points, then the React Three Fiber migration of `apps/web`.

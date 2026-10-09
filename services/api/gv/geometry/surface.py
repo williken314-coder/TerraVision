@@ -80,3 +80,55 @@ class TIN:
         X, Z = g.coords()
         g.elev = self.sample(X, Z)
         return g
+
+
+class TriMesh:
+    """A TIN with its triangles given (LandXML faces), so breaklines and boundaries are honoured.
+
+    Grid nodes outside every triangle stay NaN: nothing is extrapolated past the surface boundary.
+    """
+
+    def __init__(self, x, z, e, faces):
+        self.x = np.asarray(x, dtype=float)
+        self.z = np.asarray(z, dtype=float)
+        self.e = np.asarray(e, dtype=float)
+        self.faces = np.asarray(faces, dtype=np.int64).reshape(-1, 3)
+
+    def to_grid(self, x0, z0, cell, nx, nz, chunk: int = 200_000) -> Grid:
+        out = np.full((nz + 1) * (nx + 1), np.nan)
+        F = self.faces
+        if len(F) == 0:
+            return Grid(x0, z0, cell, nx, nz, out.reshape(nz + 1, nx + 1))
+        ax, az, ae = self.x[F[:, 0]], self.z[F[:, 0]], self.e[F[:, 0]]
+        bx, bz, be = self.x[F[:, 1]], self.z[F[:, 1]], self.e[F[:, 1]]
+        cx, cz, ce = self.x[F[:, 2]], self.z[F[:, 2]], self.e[F[:, 2]]
+        det = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz)
+        keep = np.abs(det) > 1e-12  # drop degenerate (zero-area) faces
+        # grid-index bounding box of each triangle
+        i0 = np.clip(np.ceil((np.minimum(np.minimum(ax, bx), cx) - x0) / cell - 1e-9), 0, nx).astype(np.int64)
+        i1 = np.clip(np.floor((np.maximum(np.maximum(ax, bx), cx) - x0) / cell + 1e-9), -1, nx).astype(np.int64)
+        j0 = np.clip(np.ceil((np.minimum(np.minimum(az, bz), cz) - z0) / cell - 1e-9), 0, nz).astype(np.int64)
+        j1 = np.clip(np.floor((np.maximum(np.maximum(az, bz), cz) - z0) / cell + 1e-9), -1, nz).astype(np.int64)
+        ni, nj = np.maximum(0, i1 - i0 + 1), np.maximum(0, j1 - j0 + 1)
+        cnt = np.where(keep, ni * nj, 0)
+        tris = np.nonzero(cnt)[0]
+        # process (triangle, grid node) candidate pairs in bounded chunks
+        start = 0
+        while start < len(tris):
+            csum = np.cumsum(cnt[tris[start:]])
+            stop = start + max(1, int(np.searchsorted(csum, chunk, side="right")))
+            t = tris[start:stop]
+            c = cnt[t]
+            ft = np.repeat(t, c)
+            local = np.arange(c.sum()) - np.repeat(np.cumsum(c) - c, c)
+            gi = i0[ft] + local % ni[ft]
+            gj = j0[ft] + local // ni[ft]
+            px, pz = x0 + gi * cell, z0 + gj * cell
+            l1 = ((bz[ft] - cz[ft]) * (px - cx[ft]) + (cx[ft] - bx[ft]) * (pz - cz[ft])) / det[ft]
+            l2 = ((cz[ft] - az[ft]) * (px - cx[ft]) + (ax[ft] - cx[ft]) * (pz - cz[ft])) / det[ft]
+            l3 = 1 - l1 - l2
+            inside = (l1 >= -1e-9) & (l2 >= -1e-9) & (l3 >= -1e-9)
+            val = l1 * ae[ft] + l2 * be[ft] + l3 * ce[ft]
+            out[(gj * (nx + 1) + gi)[inside]] = val[inside]
+            start = stop
+        return Grid(x0, z0, cell, nx, nz, out.reshape(nz + 1, nx + 1))

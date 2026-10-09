@@ -186,6 +186,9 @@ class Datum(BaseModel):
     epsg: Optional[int] = None  # e.g. 2227 for CA State Plane Zone III, US ft
     elevation_offset_ft: float = 0.0  # added to every plan elevation (datum conversion)
     units: Literal["ft", "m"] = "ft"
+    # [E, N] subtracted from real-world coordinates (control points, LandXML) so project
+    # coordinates stay small: x = E - E0, z = -(N - N0). Set once, the first time real coordinates arrive.
+    false_origin: Optional[list[float]] = None
 
 
 class Document(BaseModel):
@@ -196,6 +199,20 @@ class Document(BaseModel):
     error: Optional[str] = None
     uploaded_at: str
     vision_used: bool = False
+
+
+class ImportedSurface(BaseModel):
+    """A TIN surface from an imported LandXML file, and the role it plays in the model."""
+
+    document_id: str
+    index: int  # position among the file's surfaces
+    name: str
+    desc: str = ""
+    points: int
+    faces: int
+    role: Optional[Literal["existing", "proposed", "ignore"]] = None
+    role_source: Optional[Literal["name", "user"]] = None  # guessed from the surface name, or set by a person
+    used: bool = False  # this surface is the project's existing / finished surface
 
 
 class Project(BaseModel):
@@ -210,6 +227,7 @@ class Project(BaseModel):
     corridor: Optional[CorridorTemplate] = None
     existing: Optional[GridSurface] = None
     proposed: Optional[GridSurface] = None
+    imported_surfaces: list[ImportedSurface] = []
     structures: list[Structure] = []
     pipes: list[Pipe] = []
     lines: list[LinearUtility] = []

@@ -61,8 +61,11 @@ def _compass(dx: float, dz: float) -> str:
     return COMPASS[int((ang + 22.5) // 45) % 8]
 
 
-def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = None, elevation_offset: float = 0.0) -> dict:
+def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = None, elevation_offset: float = 0.0,
+             false_origin: list[float] | None = None) -> dict:
+    """``false_origin`` [E0, N0] is subtracted from control-point coordinates (see ``Datum.false_origin``)."""
     overrides = overrides or {}
+    e0, n0 = false_origin or (0.0, 0.0)
     issues: list[Issue] = []
     sheets: list[Sheet] = []
     cals: dict[str, SheetCalibration] = {}
@@ -114,7 +117,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         ctrl = overrides.get(primary, {}).get("control_points")
         if ctrl and len(ctrl) >= 2:
             k = cals[primary].ft_per_pt
-            registered[primary] = fit_similarity(np.array([[c[0] * k, c[1] * k] for c in ctrl]), np.array([[c[2], c[3]] for c in ctrl]))
+            registered[primary] = fit_similarity(np.array([[c[0] * k, c[1] * k] for c in ctrl]), np.array([[c[2] - e0, c[3] + n0] for c in ctrl]))
         else:
             registered[primary] = Similarity()
         changed = True

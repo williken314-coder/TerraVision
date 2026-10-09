@@ -21,9 +21,12 @@ import re
 from dataclasses import asdict, dataclass, field
 
 try:
-    import fitz  # PyMuPDF
-except ImportError:  # pragma: no cover - lets the pure-text helpers be tested without PyMuPDF
-    fitz = None
+    import pymupdf as fitz  # PyMuPDF >= 1.24
+except ImportError:  # pragma: no cover
+    try:
+        import fitz  # older PyMuPDF
+    except ImportError:  # lets the pure-text helpers be tested without PyMuPDF
+        fitz = None
 
 SHEET_NO = re.compile(r"\b([CEALSUG])-?\s?(\d{1,2}\.\d{1,2})\b")
 SCALE_IMP = re.compile(r"1\s*(?:\"|”|IN\.?|INCH)\s*=\s*(\d+(?:\.\d+)?)\s*(?:'|’|FT\.?|FEET)", re.I)

@@ -10,7 +10,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,10 +26,10 @@ from .demo import build_demo
 from .edits import EditError, FieldEdit, apply_edit
 from .geometry.surface import Grid
 from .geometry.utilities import NotEnoughData, trench_quantities
-from .ingest import raster, vision
+from .ingest import landxml, raster, vision
 from .ingest.pdf import page_count, render_page_png
 from .models import Datum, Project
-from .processing import process_document, rebuild_project
+from .processing import is_landxml_doc, process_document, rebuild_project
 
 MAX_UPLOAD_MB = int(os.environ.get("GV_MAX_UPLOAD_MB", "200"))
 def _web_dir() -> Path:
@@ -132,16 +132,19 @@ async def upload(pid: str, background: BackgroundTasks, file: UploadFile = File(
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File is larger than {MAX_UPLOAD_MB} MB")
-    if not data.startswith(b"%PDF"):
-        raise HTTPException(415, "Only PDF plan sets are supported right now. DXF, LandXML and IFC import are on the roadmap.")
-    try:
-        pages = page_count(data)
-    except Exception as ex:
-        raise HTTPException(422, f"Could not open the PDF: {ex}")
+    if data.startswith(b"%PDF"):
+        try:
+            pages, ext = page_count(data), "pdf"
+        except Exception as ex:
+            raise HTTPException(422, f"Could not open the PDF: {ex}")
+    elif landxml.is_landxml(data):
+        pages, ext = 0, "xml"  # surfaces are counted when the file is read
+    else:
+        raise HTTPException(415, "Upload a PDF plan set or a LandXML surface file (.xml). DXF and IFC import are on the roadmap.")
     did = dbm.new_id("doc")
-    path = dbm.DATA_DIR / "uploads" / f"{did}.pdf"
+    path = dbm.DATA_DIR / "uploads" / f"{did}.{ext}"
     path.write_bytes(data)
-    db.add(dbm.DocumentRow(id=did, project_id=pid, filename=Path(file.filename or "plans.pdf").name[:300], path=str(path), pages=pages, status="queued"))
+    db.add(dbm.DocumentRow(id=did, project_id=pid, filename=Path(file.filename or f"upload.{ext}").name[:300], path=str(path), pages=pages, status="queued"))
     db.commit()
     background.add_task(process_document, did)
     return {"id": did, "status": "queued", "pages": pages}
@@ -153,7 +156,11 @@ def document_status(did: str, db: Session = Depends(get_db)):
     if not d:
         raise HTTPException(404, "No such document")
     reps = db.query(dbm.SheetReportRow).filter_by(document_id=did).order_by(dbm.SheetReportRow.page).all()
-    return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "pages": d.pages, "status": d.status, "error": d.error,
+    if is_landxml_doc(d):
+        return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "landxml", "status": d.status, "error": d.error,
+                "surfaces": [{k: r.report.get(k) for k in ("index", "name", "desc", "points", "faces", "dropped_faces", "role_guess", "units", "epsg", "extent", "elev_range")}
+                             for r in reps]}
+    return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "pdf", "pages": d.pages, "status": d.status, "error": d.error,
             "vision_used": d.vision_used,
             "sheets": [{"page": r.page, "sheet_id": r.sheet_id, "category": r.category, "title": r.report.get("title"),
                         "scale": r.report.get("scale_text"), "items": len(r.report.get("candidates", [])),
@@ -167,6 +174,8 @@ def page_image(did: str, page: int, dpi: int = Query(72, ge=36, le=300), bbox: O
     d = db.get(dbm.DocumentRow, did)
     if not d:
         raise HTTPException(404, "No such document")
+    if is_landxml_doc(d):
+        raise HTTPException(404, "LandXML documents have no sheet images")
     clip = None
     if bbox:
         x0, y0, x1, y1 = (float(v) for v in bbox.split(","))
@@ -228,8 +237,29 @@ def set_datum(pid: str, d: Datum, db: Session = Depends(get_db)):
     row, prj = _load(db, pid)
     if prj.demo:
         raise HTTPException(400, "The demo project is read-only")
+    if d.false_origin is None:  # the datum form doesn't send it; keep the frame imported data was placed in
+        d.false_origin = prj.datum.false_origin
     prj.datum = d
     row.model = prj.model_dump(mode="json")
+    db.commit()
+    return _payload(rebuild_project(db, pid))
+
+
+class SurfaceRole(BaseModel):
+    document_id: str
+    index: int
+    role: Literal["existing", "proposed", "ignore"]
+
+
+@app.put("/api/projects/{pid}/surfaces")
+def set_surface_role(pid: str, body: SurfaceRole, db: Session = Depends(get_db)):
+    """Say whether an imported LandXML surface is the existing ground, the finished grade, or not used."""
+    row, prj = _load(db, pid)
+    if not any(s.document_id == body.document_id and s.index == body.index for s in prj.imported_surfaces):
+        raise HTTPException(404, "No such imported surface in this project")
+    ov = dict(row.overrides or {})
+    ov["surfaces"] = {**ov.get("surfaces", {}), f"{body.document_id}:{body.index}": body.role}
+    row.overrides = ov
     db.commit()
     return _payload(rebuild_project(db, pid))
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-fitz = pytest.importorskip("fitz")
+fitz = pytest.importorskip("pymupdf")
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "maple-ridge-sample-plans.pdf"
 
 
