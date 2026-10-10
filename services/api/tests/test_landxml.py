@@ -161,7 +161,7 @@ def test_landxml_with_plans_and_control_points(client):
             assert r.status_code == 200, r.text
     data = client.get(f"/api/projects/{pid}").json()
     prj = data["project"]
-    assert prj["datum"]["horizontal"] == "Registered to control points (EPSG:2227)"
+    assert prj["datum"]["horizontal"] == "Registered to control points or printed coordinates (EPSG:2227)"
     cb4 = next(s for s in prj["structures"] if s["id"] == "CB-4")
     assert cb4["x"] == pytest.approx(demo["CB-4"].x + E0 - 6052000, abs=1.0)
     assert cb4["z"] == pytest.approx(demo["CB-4"].z - (N0 - 2118000), abs=1.0)

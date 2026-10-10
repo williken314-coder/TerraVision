@@ -158,16 +158,33 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     placeable = [k for k, r in rep_by_key.items() if r.category in PLAN_CATEGORIES and cals[k].ft_per_pt and (r.candidates or k in road)]
     furniture = _furniture_marks([rep_by_key[k] for k in placeable])
     ctrl_of = {k: overrides.get(k, {}).get("control_points") for k in placeable}
+    # printed N/E callouts: control points read off the sheet, used where a person hasn't set any
+    auto_of: dict[str, Similarity] = {}
+    for k in placeable:
+        if not ctrl_of.get(k) and rep_by_key[k].control:
+            fit = _fit_printed_control(rep_by_key[k].control, cals[k].ft_per_pt, e0, n0)
+            if fit:
+                auto_of[k] = fit[0]
+                issues.append(Issue(severity="info" if not fit[2] else "warning", code="printed_control", sheet=sid_of[k], page=rep_by_key[k].page,
+                                    message=f"{sid_of[k]}: {fit[1]} printed coordinates fit the sheet to {fit[0].rms:.1f} ft RMS"
+                                            + (f"; {fit[2]} more didn't fit and were left out (a leader followed to the wrong spot?)" if fit[2] else "") + "."))
+
+    def own_frame(k: str) -> Similarity | None:
+        ctrl = ctrl_of.get(k)
+        if ctrl and len(ctrl) >= 2:
+            f = cals[k].ft_per_pt
+            return fit_similarity(np.array([[c[0] * f, c[1] * f] for c in ctrl]), np.array([[c[2] - e0, c[3] + n0] for c in ctrl]))
+        return auto_of.get(k)
 
     def grow(primary: str) -> tuple[dict[str, Similarity], list[Issue]]:
         reg: dict[str, Similarity] = {}
         found: list[Issue] = []
-        ctrl = ctrl_of.get(primary)
-        if ctrl and len(ctrl) >= 2:
-            k = cals[primary].ft_per_pt
-            reg[primary] = fit_similarity(np.array([[c[0] * k, c[1] * k] for c in ctrl]), np.array([[c[2] - e0, c[3] + n0] for c in ctrl]))
-        else:
-            reg[primary] = Similarity()
+        own = own_frame(primary)
+        reg[primary] = own or Similarity()
+        if own:  # a real-coordinate frame: every sheet with its own coordinates joins it directly
+            for k in placeable:
+                if k != primary and own_frame(k):
+                    reg[k] = own_frame(k)
         changed = True
         while changed:
             changed = False
@@ -213,14 +230,14 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     # every group of sheets that link to each other; the model is built on the most useful group
     groups, left = [], list(placeable)
     while left:
-        primary = max(left, key=lambda k: (bool(ctrl_of.get(k)), len(local.get(k, {})), road[k]["s_range"][1] - road[k]["s_range"][0] if k in road else 0,
+        primary = max(left, key=lambda k: (bool(ctrl_of.get(k)), k in auto_of, len(local.get(k, {})), road[k]["s_range"][1] - road[k]["s_range"][0] if k in road else 0,
                                            len(rep_by_key[k].candidates)))
         reg, found = grow(primary)
         groups.append((reg, found))
         left = [k for k in left if k not in reg]
     registered: dict[str, Similarity] = {}
     if groups:
-        registered, found = max(groups, key=lambda g: _group_value(g[0], rep_by_key, local, ctrl_of))
+        registered, found = max(groups, key=lambda g: _group_value(g[0], rep_by_key, local, ctrl_of, auto_of))
         issues.extend(found)
         model = ", ".join(sid_of[k] for k in rep_by_key if k in registered)
         singles = []
@@ -440,7 +457,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         corridor.pavement_section = _pavement_section(rep_by_key, sid_of, doc_of, issues)
 
     return dict(sheets=sheets, structures=structures, pipes=pipes, existing=surfaces.get("existing"), proposed=surfaces.get("proposed"),
-                alignment=alignment, corridor=corridor, issues=issues, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
+                alignment=alignment, corridor=corridor, issues=issues, real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
                                                      transform=c.to_project.as_dict() if c.to_project else None) for k, c in cals.items()})
 
 
@@ -674,14 +691,15 @@ def _same_view(a: SheetReport, b: SheetReport, ka: float, kb: float, furniture: 
     return any(math.hypot(p[0] - q[0], p[1] - q[1]) >= 0.25 * a.width_pt for i, p in enumerate(hits) for q in hits[i + 1:])
 
 
-def _group_value(reg: dict, rep_by_key: dict, local: dict, ctrl_of: dict) -> tuple:
-    """Survey control first, then both surfaces (earthwork), then structures, then everything else read."""
+def _group_value(reg: dict, rep_by_key: dict, local: dict, ctrl_of: dict, auto_of: dict | None = None) -> tuple:
+    """Control points a person set first, then both surfaces (earthwork), then structures, then coordinates
+    printed on the sheets, then everything else read."""
     n = defaultdict(int)
     for k in reg:
         for c in _surface_candidates(rep_by_key[k]):
             n[_surface_role(c)] += len(c.values["pts"]) if c.kind == "contour" else 1
     surfaces = sum(1 for r in ("existing", "proposed") if n[r] >= 12)
-    return (any(ctrl_of.get(k) for k in reg), surfaces, sum(len(local.get(k, {})) for k in reg),
+    return (any(ctrl_of.get(k) for k in reg), surfaces, sum(len(local.get(k, {})) for k in reg), any(k in (auto_of or {}) for k in reg),
             sum(len(rep_by_key[k].candidates) for k in reg), len(reg))
 
 
@@ -716,3 +734,29 @@ def _contour_outliers(r: SheetReport) -> list[tuple]:
         if abs(el[i] - near) > max(10 * interval, 25.0):
             out.append((c, near))
     return out
+
+
+def _fit_printed_control(points: list[dict], ft_per_pt: float, e0: float, n0: float):
+    """Fit a sheet to its printed coordinates at its stated scale, dropping points that don't fit (a leader
+    followed to the wrong spot). Needs three that agree within 2 ft RMS, spread over the sheet.
+    Returns (Similarity, points used, points dropped) or None."""
+    if len(points) < 3 or not ft_per_pt:
+        return None
+    src = np.array([[p["x"] * ft_per_pt, p["y"] * ft_per_pt] for p in points])
+    dst = np.array([[p["e"] - e0, -(p["n"] - n0)] for p in points])
+    keep = np.ones(len(points), bool)
+    while True:
+        sim = fit_similarity(src[keep], dst[keep], allow_scale=False)
+        if sim.rms <= 2.0:
+            break
+        if keep.sum() <= 3:
+            return None
+        px, pz = sim.apply(src[:, 0], src[:, 1])
+        r = np.hypot(px - dst[:, 0], pz - dst[:, 1])
+        r[~keep] = -1
+        keep[int(np.argmax(r))] = False
+    spread = np.ptp(src[keep], axis=0).max()
+    if spread < 100:  # ft: points bunched together pin rotation poorly
+        return None
+    sim.n = int(keep.sum())
+    return sim, int(keep.sum()), int((~keep).sum())

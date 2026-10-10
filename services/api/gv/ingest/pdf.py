@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from . import contours, ocr
+from . import contours, control, ocr
 from .roadway import chain_segments, edge_label_kind
 
 try:
@@ -155,6 +155,7 @@ class SheetReport:
     scale_source: str | None = None  # "text", or "ocr" when read from stroke-drawn (SHX) text
     views: list[dict] = field(default_factory=list)  # view titles with the scale printed under them (OCR)
     marks: list[list[float]] = field(default_factory=list)  # small dark filled marks [x, y, size] in the drawing area
+    control: list[dict] = field(default_factory=list)  # printed N/E coordinates with the point their leader marks
     symbols: list[list[float]] = field(default_factory=list)  # [x, y, size, kind(0 rect/1 circle)]
     notes: list[str] = field(default_factory=list)
 
@@ -273,8 +274,11 @@ def _dist_point_poly(x, y, pts):
 def read_page(page, index: int, spans: list[TextSpan] | None = None, common: set[str] | frozenset = frozenset()) -> SheetReport:
     w, h = page.rect.width, page.rect.height
     segs, symbols, polys, marks = _geometry(page)
-    r = build_report(index, w, h, _spans(page) if spans is None else spans, segs, symbols, polys, common)
+    r_spans = _spans(page) if spans is None else spans
+    r = build_report(index, w, h, r_spans, segs, symbols, polys, common)
     r.marks = [m for m in marks if m[0] < w * 0.86]  # not the title block's logos and seals
+    if any(control.NORTH.match(s.text) or control.NE_ONE_LINE.search(s.text) for s in r_spans):
+        r.control = control.read_control(r_spans, segs)
     return r
 
 

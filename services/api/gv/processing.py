@@ -102,7 +102,7 @@ def _process_landxml(db: Session, doc: dbm.DocumentRow, data: bytes) -> None:
     db.commit()
 
 
-def _ensure_false_origin(prj: Project, overrides: dict, surfaces: list[tuple[str, dict]]) -> None:
+def _ensure_false_origin(prj: Project, overrides: dict, surfaces: list[tuple[str, dict]], printed: list[tuple[float, float]] = ()) -> None:
     """Pick a false origin the first time real-world coordinates arrive, so project coordinates stay small.
 
     Only for coordinates that are actually large (state plane, UTM); small local site grids are left as they are.
@@ -111,6 +111,7 @@ def _ensure_false_origin(prj: Project, overrides: dict, surfaces: list[tuple[str
         return
     pts = [(c[2], -c[3]) for sh in overrides.get("sheets", {}).values() for c in sh.get("control_points") or []]
     pts += [(rep["extent"][0], rep["extent"][1]) for _, rep in surfaces if rep.get("extent")]
+    pts += list(printed)  # N/E coordinates printed on the sheets
     if pts and max(max(abs(e), abs(n)) for e, n in pts) > 20000:
         e, n = pts[0]
         prj.datum.false_origin = [math.floor(e / 1000) * 1000.0, math.floor(n / 1000) * 1000.0]
@@ -223,17 +224,16 @@ def rebuild_project(db: Session, pid: str) -> Project:
     overrides = row.overrides or {}
     reports = [(doc_id, SheetReport.from_dict(rep)) for doc_id, rep in dbm.reports_for(db, pid)]
     surfaces = dbm.reports_for(db, pid, dbm.LANDXML_SURFACE)
-    _ensure_false_origin(prj, overrides, surfaces)
+    _ensure_false_origin(prj, overrides, surfaces, [(c["e"], c["n"]) for _, r in reports for c in r.control])
     result = assemble(reports, overrides.get("sheets", {}), prj.datum.elevation_offset_ft, prj.datum.false_origin)
     prj.sheets, prj.structures, prj.pipes = result["sheets"], result["structures"], result["pipes"]
     prj.existing, prj.proposed, prj.issues = result["existing"], result["proposed"], result["issues"]
     prj.alignment, prj.corridor = result["alignment"], result["corridor"]
-    pdf_real_frame = any(c["registered"] and c["transform"] and c["transform"]["n"] >= 2 and c["transform"]["rms"] >= 0 and overrides.get("sheets", {}).get(k, {}).get("control_points")
-                         for k, c in result["calibrations"].items())
+    pdf_real_frame = result["real_frame"]
     if surfaces:
         _apply_landxml(db, prj, overrides, surfaces, pdf_real_frame, bool(prj.structures or prj.existing or prj.proposed))
     if pdf_real_frame:
-        prj.datum.horizontal = f"Registered to control points{f' (EPSG:{prj.datum.epsg})' if prj.datum.epsg else ''}"
+        prj.datum.horizontal = f"Registered to control points or printed coordinates{f' (EPSG:{prj.datum.epsg})' if prj.datum.epsg else ''}"
     elif any(s.used for s in prj.imported_surfaces):
         prj.datum.horizontal = f"LandXML coordinates{f' (EPSG:{prj.datum.epsg})' if prj.datum.epsg else ''}"
     _centerline_profile(prj)
