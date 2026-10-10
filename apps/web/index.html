@@ -810,6 +810,8 @@ async function loadProjects(selectId){const list=await api('/api/projects');$('#
 async function openProject(id){MATCH=null;renderMatch();const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
   S={};PRJ.structures.forEach(s=>S[s.id]=s);PIPES=PRJ.pipes;LINES={};PRJ.lines.forEach(l=>LINES[l.id]=l);lastPaint='';buildSite();buildUtil();renderInspect();renderReview();
   const empty=!PRJ.structures.length&&!PRJ.existing&&!PRJ.proposed;showBanner(empty?`<b>No model yet.</b> Open <b>Plans</b> and upload a PDF plan set. TerraVision reads sheet numbers, scales, contours, spot elevations, structures, rims, inverts and pipe callouts, then builds the 3D model from what it finds.`:'');
+  // an upload still being read (you left the page, or the server restarted and is reading it again): keep watching it
+  (PRJ.documents||[]).filter(d=>d.status==='queued'||d.status==='processing').forEach(d=>pollDoc(d.id,d.filename));
   setStage(st.stage,true);setMode(PRJ.structures.length?'xray':'bird');const h=homePose();camera.position.copy(h.p);controls.target.copy(h.t);st.tween=null;
   log.innerHTML='';welcome();}
 $('#prjSel').addEventListener('change',e=>openProject(e.target.value).catch(err=>toast(err.message)));
@@ -818,7 +820,9 @@ $('#newPrjForm').addEventListener('submit',async e=>{e.preventDefault();const n=
   try{const r=await api('/api/projects',jsonOpts('POST',{name:n}));$('#newPrjForm').hidden=true;$('#newPrjName').value='';await loadProjects(r.project.id);openTab('review');}catch(err){toast(err.message);}});
 $('#upl').addEventListener('change',async e=>{const f=e.target.files[0];e.target.value='';if(!f||!PRJ)return;const fd=new FormData();fd.append('file',f);
   $('#uplNote').textContent=`Uploading ${f.name}…`;try{const r=await api(`/api/projects/${PRJ.id}/documents`,{method:'POST',body:fd});pollDoc(r.id,f.name);}catch(err){$('#uplNote').textContent='Upload failed: '+err.message;}});
-async function pollDoc(did,name){const t0=Date.now();for(;;){await new Promise(r=>setTimeout(r,1200));let d;try{d=await api(`/api/documents/${did}`);}catch(e){$('#uplNote').textContent=e.message;return;}
+const POLLING=new Set();
+async function pollDoc(did,name){if(POLLING.has(did))return;POLLING.add(did);try{await pollLoop(did,name);}finally{POLLING.delete(did);}}
+async function pollLoop(did,name){const t0=Date.now();for(;;){await new Promise(r=>setTimeout(r,1200));let d;try{d=await api(`/api/documents/${did}`);}catch(e){$('#uplNote').textContent=e.message;return;}
   // reloading the project redraws the Plans panel, so the result is written after it
   if(d.status==='done'&&d.kind==='landxml'){await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.surfaces.length} surface${d.surfaces.length===1?'':'s'}: ${d.surfaces.map(s=>s.name).join(', ')}.`;
     const used=(PRJ.imported_surfaces||[]).filter(s=>s.used).map(s=>`<b>${esc(s.name)}</b> as the ${s.role==='existing'?'existing ground':'finished grade'}`);
@@ -826,7 +830,7 @@ async function pollDoc(did,name){const t0=Date.now();for(;;){await new Promise(r
   if(d.status==='done'){const sheets=d.sheets.map(s=>`${s.sheet_id||'p'+(s.page+1)} (${s.category.replace('_',' ')})`).join(', ');await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.pages} pages: ${sheets}.`;
     say('a',`Finished reading <b>${esc(name)}</b>: ${d.pages} pages, ${PRJ.structures.length} structures, ${PIPES.length} pipes${PRJ.proposed?', a finished-grade surface':''}${PRJ.existing?', an existing surface':''}. ${(AN.review||[]).length} values need your confirmation and ${(AN.issues||[]).filter(i=>i.severity!=='info').length} issues are listed in Plans.`);return;}
   if(d.status==='failed'){$('#uplNote').textContent='Processing failed: '+(d.error||'unknown error');return;}
-  $('#uplNote').textContent=`${d.status==='queued'?'Queued':'Reading'} ${name}${d.kind==='pdf'?`: ${d.pages} pages`:''}… ${Math.round((Date.now()-t0)/1000)}s`;}}
+  $('#uplNote').textContent=`${d.status==='queued'?'Queued':'Reading'} ${name}${d.progress?`: sheet ${d.progress.sheet} of ${d.progress.of}`:d.kind==='pdf'?`: ${d.pages} pages`:''}… ${Math.round((Date.now()-t0)/1000)}s`;}}
 function showBanner(html){const b=$('#banner');b.innerHTML=html;b.hidden=!html;}
 
 // ===== Excavation simulator (quantities from the API) =====

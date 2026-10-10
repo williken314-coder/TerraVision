@@ -32,7 +32,7 @@ from .geometry.utilities import NotEnoughData, trench_quantities
 from .ingest import landxml, ocr, raster, vision
 from .ingest.pdf import page_count, render_page_png
 from .models import Datum, Project
-from .processing import is_landxml_doc, process_document, rebuild_project
+from .processing import PROGRESS, is_landxml_doc, process_document, rebuild_project, resume_unfinished
 
 MATCH_SCALE_TOLERANCE = 0.05  # matched points may disagree on distance by this much (tap precision)
 MAX_UPLOAD_MB = int(os.environ.get("GV_MAX_UPLOAD_MB", "200"))
@@ -53,6 +53,7 @@ async def lifespan(_app: FastAPI):
             demo = build_demo()
             db.add(dbm.ProjectRow(id=demo.id, name=demo.name, model=demo.model_dump(mode="json"), overrides={}))
             db.commit()
+    resume_unfinished()
     yield
 
 
@@ -182,7 +183,9 @@ def document_status(did: str, db: Session = Depends(get_db)):
         return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "landxml", "status": d.status, "error": d.error,
                 "surfaces": [{k: r.report.get(k) for k in ("index", "name", "desc", "points", "faces", "dropped_faces", "role_guess", "units", "epsg", "extent", "elev_range")}
                              for r in reps]}
+    done, total = PROGRESS.get(d.id, (None, None))
     return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "pdf", "pages": d.pages, "status": d.status, "error": d.error,
+            "progress": {"sheet": done + 1, "of": total} if total else None,
             "vision_used": d.vision_used,
             "sheets": [{"page": r.page, "sheet_id": r.sheet_id, "category": r.category, "title": r.report.get("title"),
                         "scale": r.report.get("scale_text"), "items": len(r.report.get("candidates", [])),

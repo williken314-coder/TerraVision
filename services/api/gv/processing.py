@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import traceback
 from pathlib import Path
 
@@ -20,6 +21,16 @@ from .ingest.pdf import Candidate, SheetReport, read_plan_set, render_page_png
 from .models import Document, ImportedSurface, Issue, Project
 
 log = logging.getLogger("gv.processing")
+PROGRESS: dict[str, tuple[int, int]] = {}  # document id -> (sheets read, sheets), while it is being read
+
+
+def resume_unfinished() -> list[str]:
+    """Uploads left queued or half-read by a restart (a crash, a redeploy) are read again from the start."""
+    with dbm.SessionLocal() as db:
+        ids = [d.id for d in db.query(dbm.DocumentRow).filter(dbm.DocumentRow.status.in_(("queued", "processing"))).all()]
+    for i in ids:
+        threading.Thread(target=process_document, args=(i,), daemon=True, name=f"read-{i}").start()
+    return ids
 
 
 def _vision_candidates(data: dict, page: int) -> list[Candidate]:
@@ -51,7 +62,7 @@ def process_document(doc_id: str) -> None:
                 _process_landxml(db, doc, data)
                 rebuild_project(db, doc.project_id)
                 return
-            reports = read_plan_set(data)
+            reports = read_plan_set(data, on_page=lambda i, n: PROGRESS.__setitem__(doc_id, (i, n)))
             use_vision = vision.vision_available()
             for r in reports:
                 if not r.has_text_layer:
@@ -79,8 +90,10 @@ def process_document(doc_id: str) -> None:
             doc.pages = len(reports)
             doc.status = "done"
             db.commit()
+            PROGRESS.pop(doc_id, None)
             rebuild_project(db, doc.project_id)
         except Exception as ex:  # report, never hide
+            PROGRESS.pop(doc_id, None)
             log.exception("processing failed")
             doc.status, doc.error = "failed", f"{type(ex).__name__}: {ex}"
             db.commit()

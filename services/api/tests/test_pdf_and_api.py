@@ -86,3 +86,33 @@ def test_password(client, monkeypatch):
     ok = {"Authorization": "Basic " + base64.b64encode("anyone:s3cret plans".encode()).decode()}
     assert client.get("/api/projects", headers=ok).status_code == 200
     assert client.get("/api/projects", headers={"Authorization": "Basic !!notbase64"}).status_code == 401
+
+
+def test_upload_interrupted_by_a_restart_is_read_again():
+    """A crash or redeploy mid-read leaves a document 'processing'; the next start reads it again."""
+    import time
+    tmp = tempfile.mkdtemp()
+    os.environ["GV_DATA_DIR"] = tmp
+    os.environ.pop("DATABASE_URL", None)
+    for m in [m for m in sys.modules if m.startswith("gv.")]:
+        del sys.modules[m]
+    api = importlib.import_module("gv.api")
+    dbm = api.dbm
+    from fastapi.testclient import TestClient
+
+    with TestClient(api.app) as c:
+        pid = c.post("/api/projects", json={"name": "Restart"}).json()["project"]["id"]
+    # what a restart leaves behind: the file stored, the row stuck mid-read
+    path = dbm.DATA_DIR / "uploads" / "doc_restart.pdf"
+    path.write_bytes(SAMPLE.read_bytes())
+    with dbm.SessionLocal() as db:
+        db.add(dbm.DocumentRow(id="doc_restart", project_id=pid, filename="plans.pdf", path=str(path), pages=7, status="processing"))
+        db.commit()
+    with TestClient(api.app) as c:  # the server starts again
+        for _ in range(120):
+            st = c.get("/api/documents/doc_restart").json()
+            if st["status"] in ("done", "failed"):
+                break
+            time.sleep(0.5)
+        assert st["status"] == "done", st
+        assert len(c.get(f"/api/projects/{pid}").json()["project"]["structures"]) == 11

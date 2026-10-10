@@ -515,13 +515,16 @@ def _inches(text: str) -> float:
     return total
 
 
-def read_plan_set(data: bytes) -> list[SheetReport]:
+def read_plan_set(data: bytes, on_page=None) -> list[SheetReport]:
+    """``on_page(done, total)`` is called as each sheet is read, for progress."""
     doc = fitz.open(stream=data, filetype="pdf")
     try:
         spans = [_spans(p) for p in doc]
         common = common_text(spans)
         reports = []
         for i, p in enumerate(doc):
+            if on_page:
+                on_page(i, doc.page_count)
             r = read_page(p, i, spans[i], common)
             if r.scale_ft_per_in:
                 r.scale_source = "text"
