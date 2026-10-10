@@ -93,8 +93,14 @@ def documents_for(db: Session, pid: str) -> list[DocumentRow]:
     return list(db.scalars(select(DocumentRow).where(DocumentRow.project_id == pid).order_by(DocumentRow.created_at)))
 
 
-def reports_for(db: Session, pid: str) -> list[tuple[str, dict]]:
-    rows = db.execute(select(SheetReportRow).join(DocumentRow).where(DocumentRow.project_id == pid).order_by(SheetReportRow.document_id, SheetReportRow.page))
+LANDXML_SURFACE = "landxml_surface"  # SheetReportRow.category for a surface summary from a LandXML file
+
+
+def reports_for(db: Session, pid: str, category: str | None = None) -> list[tuple[str, dict]]:
+    """Per-page plan reports, or with ``category=LANDXML_SURFACE`` the imported surface summaries."""
+    q = select(SheetReportRow).join(DocumentRow).where(DocumentRow.project_id == pid)
+    q = q.where(SheetReportRow.category == category) if category else q.where(SheetReportRow.category != LANDXML_SURFACE)
+    rows = db.execute(q.order_by(DocumentRow.created_at, SheetReportRow.document_id, SheetReportRow.page))
     return [(r.document_id, r.report) for (r,) in rows]
 
 

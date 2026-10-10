@@ -1,3 +1,7 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>TerraVision AI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -129,6 +133,7 @@ p{margin:0}
 .askf input:focus{border-color:var(--accent);outline:none}
 
 /* Viewport overlays */
+[hidden]{display:none!important}
 .ov{position:absolute;z-index:2}
 .tl{top:12px;left:12px;display:flex;flex-direction:column;gap:8px;align-items:flex-start;max-width:calc(100% - 130px)}
 .tr{top:12px;right:12px;display:flex;flex-direction:column;gap:6px;align-items:stretch}
@@ -196,7 +201,7 @@ p{margin:0}
 .banner{top:auto;left:12px;right:12px;bottom:110px;padding:10px 12px;font-size:14px;line-height:1.4;border-color:color-mix(in srgb,var(--ai) 55%,var(--line))}
 .banner b{color:var(--ai)}
 .prj-row{display:flex;gap:8px;align-items:center}
-.prj-row select,.inline-form input,.calib input{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:15px;min-width:0}
+.prj-row select,.inline-form input,.calib input,.calib select{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:15px;min-width:0}
 .prj-row select{flex:1}
 .inline-form{display:flex;gap:6px}
 .inline-form input{flex:1}
@@ -213,7 +218,15 @@ p{margin:0}
 .calib b{font:600 12.5px var(--f-mono);color:var(--accent)}
 .calib small{display:block;color:var(--muted);font-size:12px}
 .calib .sc{display:flex;gap:4px;align-items:center;grid-column:1/-1}
+#matchBox{border:1px solid var(--accent);border-radius:12px;padding:10px;margin:6px 0 12px;display:flex;flex-direction:column;gap:8px}
+#matchBox .mimg{position:relative;overflow:auto;max-height:46vh;border:1px solid var(--line);border-radius:8px;background:#fff;touch-action:pan-x pan-y}
+#matchBox .mimg img{display:block;width:100%;cursor:crosshair}
+#matchBox .mimg.next{outline:2px solid var(--accent)}
+#matchBox .dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid var(--accent);background:rgba(255,92,158,.35);pointer-events:none;font:600 10px var(--f-mono);color:#000;text-align:center;line-height:10px}
+#matchBox .mhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+#matchBox select{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 8px;flex:1;min-width:0;max-width:100%;text-overflow:ellipsis}
 .calib .sc input{width:5.5em}
+#datumForm .calib{grid-template-columns:4.2em minmax(7em,1fr) minmax(0,1fr)}
 .srcimg{grid-column:1/-1;max-width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:4px}
 .sources{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
 .sources span{font:600 10.5px var(--f-mono);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);border-radius:4px;padding:0 5px}
@@ -301,8 +314,8 @@ p{margin:0}
           <div class="prj-row"><select id="prjSel" aria-label="Project"></select><button class="btn sm" id="newPrjBtn">New</button></div>
           <form class="inline-form" id="newPrjForm" hidden><input id="newPrjName" placeholder="Project name" aria-label="New project name"><button class="btn sm pri">Create</button></form>
           <ul class="docs" id="docList"></ul>
-          <label class="btn pri" for="upl" id="uplLbl" style="text-align:center">Upload plan set (PDF)</label>
-          <input type="file" id="upl" accept="application/pdf,.pdf" hidden>
+          <label class="btn pri" for="upl" id="uplLbl" style="text-align:center">Upload plans (PDF) or surfaces (LandXML)</label>
+          <input type="file" id="upl" accept="application/pdf,.pdf,.xml,application/xml,text/xml" hidden>
           <p class="note" id="uplNote"></p>
         </div>
         <h4>Extraction status</h4>
@@ -315,7 +328,9 @@ p{margin:0}
         <h4>Utility crossings</h4>
         <ul class="list" id="xList"></ul>
         <h4>Sheets &amp; calibration</h4>
+        <div id="matchBox" hidden></div>
         <div id="sheets"></div>
+        <div id="surfBox" hidden><h4>Imported surfaces</h4><div id="surfs"></div></div>
         <h4>Datum &amp; units</h4>
         <form class="card" id="datumForm">
           <div class="calib" style="border:0;padding:0"><b>Vert.</b><input id="dVert" aria-label="Vertical datum"><span></span>
@@ -364,6 +379,12 @@ function gridOf(m){if(!m)return null;const W=m.nx+1,e=Float32Array.from(m.elev,v
   return{m,W,e,x0:m.x0,z0:m.z0,cell:m.cell,nx:m.nx,nz:m.nz,
     sample(x,z){const ri=(x-m.x0)/m.cell,rj=(z-m.z0)/m.cell;if(ri<0||rj<0||ri>m.nx||rj>m.nz)return NaN;const i=Math.min(m.nx-1,Math.floor(ri)),j=Math.min(m.nz-1,Math.floor(rj)),u=ri-i,v=rj-j;
       return e[j*W+i]*(1-u)*(1-v)+e[j*W+i+1]*u*(1-v)+e[(j+1)*W+i]*(1-u)*v+e[(j+1)*W+i+1]*u*v;}};}
+const EDGE_NAME={pavement:'Edge of pavement',curb_face:'Face of curb',curb_back:'Back of curb',walk_inner:'Sidewalk, inner edge',walk_outer:'Sidewalk, outer edge',row:'Right-of-way'};
+function sides(){const cr=PRJ&&PRJ.corridor;if(!cr)return null;
+  if(!(cr.edges&&cr.edges.length)){const hw=cr.pavement_half_width,sd={pav:hw,back:hw!=null&&cr.curb_width!=null?hw+cr.curb_width:null,wi:cr.walk_inner,wo:cr.walk_outer};return{L:sd,R:{...sd}};}
+  const E=(k,sd)=>{const e=cr.edges.find(e=>e.kind===k&&e.side===sd);return e&&e.offset.value!=null?e.offset.value:null;};
+  const sd=x=>({pav:E('pavement',x),back:E('curb_back',x),wi:E('walk_inner',x),wo:E('walk_outer',x)});return{L:sd('L'),R:sd('R')};}
+function roadObj(id){const cr=PRJ&&PRJ.corridor;if(!cr||!(cr.edges&&cr.edges.length))return null;return id===cr.id?cr:cr.edges.find(e=>e.id===id)||null;}
 function mkAlign(a){if(!a||!a.points||a.points.length<2)return null;const P=a.points,n=P.length;
   const nx=[],nz=[],tx=[],tz=[];for(let i=0;i<n;i++){const p=P[Math.max(0,i-1)],q=P[Math.min(n-1,i+1)];const dx=q.x-p.x,dz=q.z-p.z,l=Math.hypot(dx,dz);tx.push(dx/l);tz.push(dz/l);nx.push(-dz/l);nz.push(dx/l);}
   const L=P[n-1].s,S0=P[0].s;
@@ -376,7 +397,7 @@ function mkAlign(a){if(!a||!a.points||a.points.length<2)return null;const P=a.po
       if(dd<best){best=dd;const l=Math.sqrt(l2);bs=A.s+(B.s-A.s)*u;bd=dx*(-vz/l)+dz*(vx/l);}}return{s:bs,d:bd};}};}
 const sta=(s,dec=0)=>{const v=Math.max(0,s);let h=Math.floor(v/100),r=+(v-h*100).toFixed(dec);if(r>=100){h++;r=0;}return h+'+'+(r<10?'0':'')+r.toFixed(dec);};
 const off=d=>Math.abs(d).toFixed(1)+'′ '+(d<0?'LT':'RT');
-function where(x,z){if(AL){const o=AL.xz2so(x,z);return`Sta ${sta(o.s)}, ${off(o.d)}`;}return`E ${x.toFixed(1)}, N ${(-z).toFixed(1)} (project grid)`;}
+function where(x,z){if(AL){const o=AL.xz2so(x,z);return`Sta ${sta(o.s)}, ${off(o.d)}`;}const fo=PRJ&&PRJ.datum&&PRJ.datum.false_origin;return fo?`E ${(x+fo[0]).toFixed(1)}, N ${(fo[1]-z).toFixed(1)}`:`E ${x.toFixed(1)}, N ${(-z).toFixed(1)} (project grid)`;}
 const fgAt=(x,z)=>FG?FG.sample(x,z):NaN, egAt=(x,z)=>EG?EG.sample(x,z):NaN;
 function groundAt(x,z){let g=fgAt(x,z);if(!isFinite(g))g=egAt(x,z);return isFinite(g)?g:BASE;}
 
@@ -439,7 +460,7 @@ function treeSet(list,col){const g=new T.Group();if(!list.length)return g;const 
 
 // ----- build the static site from project data -----
 function buildSite(){while(SITE.children.length){const c=SITE.children.pop();disposeTree(c);}O={};lastPaint='';
-  EG=gridOf(PRJ.existing);FG=gridOf(PRJ.proposed);AL=mkAlign(PRJ.alignment);
+  EG=gridOf(PRJ.existing);FG=gridOf(PRJ.proposed);AL=mkAlign(PRJ.alignment);const SD=sides();
   const rims=PRJ.structures.map(s=>s.rim.value).filter(v=>v!=null),grid=FG||EG;
   if(grid){const v=Array.from(grid.e).filter(isFinite).sort((a,b)=>a-b);BASE=v.length?v[Math.floor(v.length*.05)]-6:0;}else if(rims.length)BASE=Math.min(...rims)-15;else BASE=0;
   // site extents
@@ -447,22 +468,31 @@ function buildSite(){while(SITE.children.length){const c=SITE.children.pop();dis
   [EG,FG].forEach(G=>{if(G){add(G.x0,G.z0);add(G.x0+G.nx*G.cell,G.z0+G.nz*G.cell);}});PRJ.structures.forEach(s=>add(s.x,s.z));
   if(box.isEmpty()){add(-100,-100);add(100,100);}
   const c=box.getCenter(V3()),sz=box.getSize(V3());O.center=V3(c.x,wy(grid?(grid.sample(c.x,c.z)||BASE+6):(rims.length?rims[0]:BASE)),c.z);if(!isFinite(O.center.y))O.center.y=6;O.radius=Math.max(80,Math.hypot(sz.x,sz.z)/2);
+  // fog, zoom-out limit and far plane follow the site's size (a 1,500 ft earthwork site, not just the 600 ft demo)
+  scene.fog.near=Math.max(900,O.radius*2.5);scene.fog.far=Math.max(2400,O.radius*7);controls.maxDistance=Math.max(3000,O.radius*6);camera.far=Math.max(8000,O.radius*14);camera.updateProjectionMatrix();
   Object.assign(sun.shadow.camera,{left:-O.radius,right:O.radius,top:O.radius,bottom:-O.radius,near:50,far:O.radius*4});sun.position.set(c.x-O.radius*.6,O.radius*1.2,c.z+O.radius*.5);sun.target.position.set(c.x,0,c.z);sun.shadow.camera.updateProjectionMatrix();
   // surfaces
   if(EG){O.existMesh=new T.Mesh(surfGeo(EG),mExist);O.existMesh.userData={kind:'ground'};O.existMesh.receiveShadow=true;O.existC=contourObj(EG,true);SITE.add(O.existMesh,O.existC);}
   if(FG){O.propMesh=new T.Mesh(surfGeo(FG),mProp);O.propMesh.userData={kind:'ground'};O.propMesh.receiveShadow=true;O.propC=contourObj(FG,false);SITE.add(O.propMesh,O.propC);
     // per-vertex existing ground under the finished-grade grid, for cut/fill coloring
     const N=(FG.nx+1)*(FG.nz+1);O.egUnder=new Float32Array(N);O.road=new Uint8Array(N);
-    for(let k=0;k<N;k++){const x=FG.x0+(k%FG.W)*FG.cell,z=FG.z0+Math.floor(k/FG.W)*FG.cell;O.egUnder[k]=egAt(x,z);if(AL){const o=AL.xz2so(x,z);if(o.s>=AL.S0&&o.s<=AL.L&&Math.abs(o.d)<=15)O.road[k]=1;}
+    for(let k=0;k<N;k++){const x=FG.x0+(k%FG.W)*FG.cell,z=FG.z0+Math.floor(k/FG.W)*FG.cell;O.egUnder[k]=egAt(x,z);if(AL){const o=AL.xz2so(x,z),sd=SD?(o.d<0?SD.L:SD.R):null,lim=sd&&sd.pav!=null?sd.pav+1:15;if(o.s>=AL.S0&&o.s<=AL.L&&Math.abs(o.d)<=lim)O.road[k]=1;}
       if(PRJ.pond&&Math.hypot((x-PRJ.pond.x)/PRJ.pond.rx,(z-PRJ.pond.z)/PRJ.pond.rz)<1)O.road[k]=2;}}
   // corridor (only when an alignment and typical section exist)
   O.road3={};
-  if(AL&&PRJ.corridor&&FG){const cr=PRJ.corridor,hw=cr.pavement_half_width,cs=cr.crown_slope,ze=(r,a)=>r+.22+.02*(a-14);
-    const crown=s=>{const r=AL.prof(s);return[-hw,-hw/2,0,hw/2,hw].map(x=>[x,r-cs*Math.abs(x)+.06]);};
+  // only what the plans show: curbs and walks are drawn on a side only where their lines were read
+  if(AL&&SD&&FG&&SD.L.pav!=null&&SD.R.pav!=null&&isFinite(AL.prof(AL.S0))){const cr=PRJ.corridor,cs=cr.crown_slope,L=SD.L,R=SD.R,ze=(r,a,p)=>r+.22+.02*(a-p);
+    // the crown is drawn, not read, so keep it just above the finished-grade surface wherever that is higher
+    const lift=(s,o,e)=>{const q=AL.so2xz(s,o),g=fgAt(q.x,q.z);return isFinite(g)?Math.max(e,g+.06):e;};
+    const crown=s=>{const r=AL.prof(s);return[-L.pav,-L.pav/2,0,R.pav/2,R.pav].map(o=>[o,lift(s,o,r-cs*Math.abs(o)+.06)]);};
     O.road3.asph=sweepCL(AL.S0,AL.L,5,crown,mAsph);O.road3.base=sweepCL(AL.S0,AL.L,5,crown,mBase);
     O.road3.stripes=new T.Group();O.road3.stripes.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s)+.09;return[[-.55,r],[-.2,r]];},mStripe),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s)+.09;return[[.2,r],[.55,r]];},mStripe));
-    O.road3.curbs=new T.Group();O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[hw,r-.25],[hw,r+.22],[hw+cr.curb_width,r+.24]];},mCurb),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-hw-cr.curb_width,r+.24],[-hw,r+.22],[-hw,r-.25]];},mCurb));
-    O.road3.walks=new T.Group();O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[cr.walk_inner,ze(r,cr.walk_inner)+.07],[cr.walk_outer,ze(r,cr.walk_outer)+.07]];},mWalk),sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-cr.walk_outer,ze(r,cr.walk_outer)+.07],[-cr.walk_inner,ze(r,cr.walk_inner)+.07]];},mWalk));
+    O.road3.curbs=new T.Group();
+    if(R.back!=null)O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[R.pav,r-.25],[R.pav,r+.22],[R.back,r+.24]];},mCurb));
+    if(L.back!=null)O.road3.curbs.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-L.back,r+.24],[-L.pav,r+.22],[-L.pav,r-.25]];},mCurb));
+    O.road3.walks=new T.Group();
+    if(R.wi!=null&&R.wo!=null)O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[R.wi,ze(r,R.wi,R.pav)+.07],[R.wo,ze(r,R.wo,R.pav)+.07]];},mWalk));
+    if(L.wi!=null&&L.wo!=null)O.road3.walks.add(sweepCL(AL.S0,AL.L,5,s=>{const r=AL.prof(s);return[[-L.wo,ze(r,L.wo,L.pav)+.07],[-L.wi,ze(r,L.wi,L.pav)+.07]];},mWalk));
     O.road3.asph.userData=O.road3.base.userData={kind:'ground'};
     O.staLabels=new T.Group();for(let s=Math.ceil(AL.S0/100)*100;s<=AL.L;s+=100){const p=AL.so2xz(s,0),sp=label(sta(s),{fg:'#ff9cc5',h:.026});sp.position.set(p.x,wy(AL.prof(s))+2,p.z);O.staLabels.add(sp);}
     SITE.add(O.road3.asph,O.road3.base,O.road3.stripes,O.road3.curbs,O.road3.walks,O.staLabels);}
@@ -587,7 +617,9 @@ function setRealistic(on){scene.background=on?skyTex:BG;scene.fog.color.set(on?0
 function homePose(){const asp=Math.max(.45,camera.aspect),r=O.radius||300,dist=(asp<1?r*1.7/asp:r*1.7),dir=V3(-.5,.62,.6).normalize();return{p:O.center.clone().addScaledVector(dir,Math.min(dist,r*4)),t:O.center.clone()};}
 function flyTo(t,p,dur=900){if(st.fps)leaveFps();st.tween={t0:controls.target.clone(),p0:camera.position.clone(),t1:t.clone(),p1:p.clone(),s:performance.now(),dur:reduceMotion?1:dur};}
 function flyHome(){const h=homePose();flyTo(h.t,h.p);}
-function flyToObj(id,scale=1){const ms=U.byId[id];if(!ms||!ms.length)return;const b=new T.Box3();ms.forEach(m=>b.expandByObject(m));const c=b.getCenter(V3()),r=Math.max(18,b.getSize(V3()).length()*.8)*scale;
+function flyToObj(id,scale=1){const ro=roadObj(id);if(ro&&AL){const s=ro.station_from!=null?(ro.station_from+ro.station_to)/2:(AL.S0+AL.L)/2,d=ro.side?(ro.side==='L'?-1:1)*(ro.offset.value||0):0,p=AL.so2xz(s,d),y=wy(isFinite(AL.prof(s))?AL.prof(s):BASE);
+    flyTo(V3(p.x,y,p.z),V3(p.x-40,y+45,p.z+55));return;}
+  const ms=U.byId[id];if(!ms||!ms.length)return;const b=new T.Box3();ms.forEach(m=>b.expandByObject(m));const c=b.getCenter(V3()),r=Math.max(18,b.getSize(V3()).length()*.8)*scale;
   const dir=camera.position.clone().sub(controls.target);dir.y=0;if(dir.lengthSq()<1)dir.set(-1,0,1);dir.normalize();flyTo(c,c.clone().add(V3(dir.x*r*1.3,r*1.05,dir.z*r*1.3)));}
 function enterFps(pos,yaw,pitch){st.fps=true;controls.enabled=false;st.tween=null;camera.position.copy(pos);st.yaw=yaw;st.pitch=pitch;}
 function leaveFps(){st.fps=false;st.drive=null;controls.enabled=true;camera.rotation.set(0,0,0);}
@@ -600,7 +632,7 @@ function setMode(m){if(st.sim&&m!=='operator')endSim(true);st.mode=m;document.qu
   if(m==='bird'){st.xray=false;if(st.fps)leaveFps();flyHome();}
   else if(m==='xray'){st.xray=true;if(st.stage<4)setStage(7,true);if(st.fps)leaveFps();flyHome();}
   else if(m==='finished'){st.xray=false;setStage(7,true);if(st.fps)leaveFps();const h=homePose();flyTo(h.t,h.t.clone().add(V3(-O.radius*.7,O.radius*.32,O.radius*.8)),1200);}
-  else if(m==='walk'){st.xray=false;if(st.stage<3)setStage(7,true);let p;if(AL)p=AL.so2xz(AL.S0+8,-(PRJ.corridor?PRJ.corridor.walk_inner+2.5:20));else p={x:O.center.x-O.radius*.5,z:O.center.z};
+  else if(m==='walk'){st.xray=false;if(st.stage<3)setStage(7,true);let p;const sw=(sides()||{L:{}}).L;if(AL)p=AL.so2xz(AL.S0+8,-(sw.wi!=null?sw.wi+2.5:sw.pav!=null?sw.pav+4:20));else p={x:O.center.x-O.radius*.5,z:O.center.z};
     const pos=V3(p.x,wy(groundAt(p.x,p.z))+5.5,p.z);enterFps(pos,lookYaw(pos,O.center),-.04);}
   else if(m==='operator'){if(!exc){toast('No pipe with elevations to dig yet');setMode('bird');return;}st.xray=false;if(st.stage<4)setStage(4,true);exc.updateMatrixWorld(true);const cab=exc.localToWorld(exc.userData.cab.clone()),tg=exc.userData.tgt;
     enterFps(cab,lookYaw(cab,tg),Math.atan2(tg.y-cab.y,Math.hypot(tg.x-cab.x,tg.z-cab.z)));const p=PIPES.find(p=>p.id===exc.userData.pipe);if(p)startSim(p,false);}
@@ -638,12 +670,12 @@ function pick(cx,cy){const r=canvas.getBoundingClientRect();ndc.set((cx-r.left)/
 function select(id,opts={}){st.sel=id;stake.visible=false;editing=null;applyGlow();renderInspect();if(opts.fly)flyToObj(id,opts.scale||1);if(opts.open!==false)openTab('inspect');
   const s=sysOf(id),o=getObj(id);if(s&&!Lon[s]){Lon[s]=true;applyVis();}const above=o&&['FH','TX'].includes(o.kind);
   if(s&&!above&&!underVis(s))setStage(7);if(s&&!above&&!st.xray&&!st.fps&&!st.sim)setXray(true);}
-function getObj(id){return S[id]||PIPES.find(p=>p.id===id)||LINES[id]||null;}
+function getObj(id){return S[id]||PIPES.find(p=>p.id===id)||LINES[id]||roadObj(id)||null;}
 function pill(stt,conf){const m={verified:['v','Verified'],user:['u','✓ Confirmed'],ai:['ai','AI '+Math.round((conf||0)*100)+'%'],missing:['mi','Missing'],calc:['ca','Calculated']}[stt]||['ca',stt];return`<span class="pill ${m[0]}">${m[1]}</span>`;}
 function srcTxt(f){if(!f||!f.source)return'';return f.source+(f.page!=null?` · p.${f.page+1}`:'');}
 function srcBtn(f){return f&&f.document_id&&f.page!=null&&f.bbox?`<button class="btn sm" data-act="src" data-doc="${f.document_id}" data-page="${f.page}" data-bbox="${f.bbox.join(',')}">Sheet</button>`:'';}
 function factRow(o,f,k,valTxt){const fact=o[f];const stt=fact.status;
-  if(editing&&editing.id===o.id&&editing.f===f){const isNum=['rim','inv_up','inv_dn','cover','dia_in'].includes(f);
+  if(editing&&editing.id===o.id&&editing.f===f){const isNum=['rim','inv_up','inv_dn','cover','dia_in','offset'].includes(f);
     return`<div class="f"><span class="k">${k}</span><input id="edIn" ${isNum?'type="number" inputmode="decimal" step="0.01"':''} value="${esc(fact.value??'')}"><div class="meta"><span class="src">Your value replaces the plan reading</span><button class="btn sm" data-act="cancel">Cancel</button><button class="btn sm pri" data-act="save" data-id="${o.id}" data-f="${f}">Save</button></div></div>`;}
   const act=stt==='ai'?`<button class="btn sm" data-act="confirm" data-id="${o.id}" data-f="${f}">Confirm</button><button class="btn sm" data-act="edit" data-id="${o.id}" data-f="${f}">Correct</button>`:
     stt==='missing'?`<button class="btn sm pri" data-act="edit" data-id="${o.id}" data-f="${f}">Enter value</button>`:`<button class="btn sm" data-act="edit" data-id="${o.id}" data-f="${f}">Edit</button>`;
@@ -655,12 +687,19 @@ const EMPTY=`<div class="empty"><svg viewBox="0 0 48 48" fill="none" stroke="cur
 let editing=null;
 function renderInspect(){const box=$('#pInspect');const id=st.sel;if(!id||!PRJ){box.innerHTML=EMPTY;return;}
   if(id.startsWith('GP:')){const[,x,z]=id.split(':').map(Number);const e=egAt(x,z),p=fgAt(x,z),dz=p-e;
-    let zone='';if(AL){const o=AL.xz2so(x,z),a=Math.abs(o.d),cr=PRJ.corridor;if(cr&&o.s>=AL.S0&&o.s<=AL.L)zone=a<=cr.pavement_half_width?'Roadway pavement':a<=cr.pavement_half_width+cr.curb_width?'Curb & gutter':a<cr.walk_inner?'Tree lawn':a<=cr.walk_outer?'Sidewalk':'Lot / grading';}
+    let zone='',zside=null;const SD=sides();if(AL&&SD){const o=AL.xz2so(x,z),a=Math.abs(o.d),sd=o.d<0?SD.L:SD.R;zside=o.d<0?'L':'R';
+      if(o.s>=AL.S0&&o.s<=AL.L&&sd.pav!=null)zone=a<=sd.pav?'Roadway pavement':sd.back!=null&&a<=sd.back?'Curb & gutter':sd.wi!=null&&a<sd.wi?'Parkway':sd.wi!=null&&sd.wo!=null&&a<=sd.wo?'Sidewalk':'Outside the road';}
     box.innerHTML=`<div class="ih"><span class="sw" style="background:var(--accent)"></span><div><h3>Grade check</h3><p>${esc(zone||where(x,z))}</p></div></div>
       ${isFinite(dz)?`<div class="stake"><small>${dz<0?'Cut':'Fill'}</small>${dz<0?'C':'F'}${Math.abs(dz).toFixed(1)}</div>`:''}
       <div class="fields">${calcRow('Location',where(x,z))}${isFinite(e)?calcRow('Existing grade (EG)',e.toFixed(2),'Surface from '+esc(PRJ.existing.source||'plans')):`<div class="f"><span class="k">Existing grade</span><span class="val">—</span><div class="meta">${pill('missing')}<span class="src">No existing surface here</span></div></div>`}
       ${isFinite(p)?calcRow('Finished grade (FG)',p.toFixed(2),'Surface from '+esc(PRJ.proposed.source||'plans')):`<div class="f"><span class="k">Finished grade</span><span class="val">—</span><div class="meta">${pill('missing')}<span class="src">No finished surface here</span></div></div>`}
-      ${zone==='Roadway pavement'&&PRJ.corridor?factRow({id:'corr',pavement_section:PRJ.corridor.pavement_section},'pavement_section','Pavement section').replace(/<button class="btn sm" data-act="edit".*?<\/button>/,''):''}</div>`;return;}
+      ${zone==='Roadway pavement'&&PRJ.corridor?(roadObj(PRJ.corridor.id)?factRow(PRJ.corridor,'pavement_section','Pavement section'):factRow({id:'corr',pavement_section:PRJ.corridor.pavement_section},'pavement_section','Pavement section').replace(/<button class="btn sm" data-act="edit".*?<\/button>/,'')):''}
+      ${zone&&zside&&PRJ.corridor&&PRJ.corridor.edges?PRJ.corridor.edges.filter(e=>e.side===zside).map(e=>factRow(e,'offset',EDGE_NAME[e.kind]+' '+e.side+'T',e.offset.value!=null?e.offset.value.toFixed(2)+' ft':null)).join(''):''}</div>`;return;}
+  const ro=roadObj(id);if(ro){const cr=PRJ.corridor,isSec=ro===cr;
+    box.innerHTML=`<div class="ih"><span class="sw" style="background:#8f8b80"></span><div><h3>${isSec?'Pavement section':esc(EDGE_NAME[ro.kind]+' '+ro.side+'T')}</h3><p>${esc(PRJ.alignment?PRJ.alignment.name:'')}${isSec?'':` · Sta ${sta(ro.station_from)} to ${sta(ro.station_to)}`}</p></div></div>
+      <div class="fields">${isSec?factRow(cr,'pavement_section','Layers, top down'):factRow(ro,'offset','Offset from centerline',ro.offset.value!=null?ro.offset.value.toFixed(2)+' ft '+ro.side+'T':null)}
+      ${isSec?'':calcRow('Named from',ro.named_by==='label'?'A label on the plan':'Its order outward from the centerline','Confirm or correct it if the plan says otherwise')}
+      ${cr.crown_slope_assumed?calcRow('Cross slope',(cr.crown_slope*100).toFixed(1)+'%','Assumed for drawing only; not read from the plans','assumed'):''}</div>`;return;}
   if(id.startsWith('LOT-')){const h=PRJ.buildings.find(b=>b.id===id);if(!h){box.innerHTML=EMPTY;return;}box.innerHTML=`<div class="ih"><span class="sw" style="background:#b8a58c"></span><div><h3>Lot ${h.lot}</h3><p>${where(h.x,h.z)}</p></div></div><div class="fields">${factRow(h,'ffe','Finished floor (FFE)',h.ffe.value?.toFixed(2)).replace(/<button class="btn sm" data-act="edit".*?<\/button>/,'')}${calcRow('Pad grade',h.pad.toFixed(2))}</div>`;return;}
   const o=getObj(id);if(!o){box.innerHTML=EMPTY;return;}
   if(PIPES.includes(o)){const c=AN.pipes[o.id]||{};const low=c.min_cover!=null&&c.min_cover<3;
@@ -686,6 +725,8 @@ function renderInspect(){const box=$('#pInspect');const id=st.sel;if(!id||!PRJ){
 async function refresh(data,msg){PRJ=data.project;AN=data.analysis;S={};PRJ.structures.forEach(s=>S[s.id]=s);PIPES=PRJ.pipes;LINES={};PRJ.lines.forEach(l=>LINES[l.id]=l);
   buildUtil();renderInspect();renderReview();if(st.sim){const p=PIPES.find(p=>p.id===st.sim.pipe.id);if(p)startSim(p,false,st.sim.phase);else endSim();}if(msg)toast(msg);}
 async function sendEdit(body){try{const r=await api(`/api/projects/${PRJ.id}/fields`,jsonOpts('PATCH',body));editing=null;await refresh(r,r.message);}catch(e){toast(e.message);}}
+$('#dockBody').addEventListener('change',async e=>{const sel=e.target.closest('select[data-act="role"]');if(!sel||!sel.value)return;
+  try{toast('Updating surfaces…');await refresh(await api(`/api/projects/${PRJ.id}/surfaces`,jsonOpts('PUT',{document_id:sel.dataset.doc,index:+sel.dataset.i,role:sel.value})),'Surface role saved; model rebuilt');lastPaint='';buildSite();buildUtil();}catch(err){toast(err.message);}});
 $('#dockBody').addEventListener('click',async e=>{const b=e.target.closest('[data-act]');if(!b)return;const a=b.dataset.act,id=b.dataset.id,f=b.dataset.f;
   if(a==='confirm')sendEdit({object_id:id,field:f,action:'confirm'});
   else if(a==='edit'){editing={id,f};renderInspect();const i=$('#edIn');if(i)i.focus();}
@@ -697,10 +738,47 @@ $('#dockBody').addEventListener('click',async e=>{const b=e.target.closest('[dat
   else if(a==='fly')flyToObj(id);else if(a==='iso')isolate(id);else if(a==='cross')goCross(id);
   else if(a==='sel'){if(getObj(id))select(id,{fly:true});}
   else if(a==='ask')ask(b.dataset.q);
+  else if(a==='place')openMatch(b.dataset.doc,b.dataset.page,b.dataset.id);
+  else if(a==='mundo'){MATCH.taps.pop();updateMatch();}
+  else if(a==='mcancel'){MATCH=null;renderMatch();}
+  else if(a==='msave')saveMatch();
+  else if(a==='mzoom'){MATCH.zoom=Math.max(1,Math.min(4,MATCH.zoom*(+b.dataset.z>0?1.5:1/1.5)));$('#matchBox').querySelectorAll('.mimg img').forEach(i=>i.style.width=MATCH.zoom*100+'%');}
   else if(a==='scale'){const inp=b.parentElement.querySelector('input'),v=parseFloat(inp.value);if(!(v>0)){toast('Enter feet per inch, e.g. 40');return;}
     try{toast('Recalibrating…');await refresh(await api(`/api/projects/${PRJ.id}/calibration`,jsonOpts('PUT',{document_id:b.dataset.doc,page:+b.dataset.page,scale_ft_per_in:v})),'Scale saved; model rebuilt');buildSite();buildUtil();flyHome();}catch(err){toast(err.message);}}});
 function goCross(cid){const c=crossings.find(x=>x.id===cid);if(!c)return;if(st.mode==='finished'||st.fps)setMode('xray');else setXray(true);if(st.stage<4)setStage(7);
   [sysOf(c.upper),sysOf(c.lower)].forEach(s=>{if(s)Lon[s]=true;});applyVis();select(c.upper,{open:true});const t=V3(c.x,wy(c.elev_mid),c.z);flyTo(t,t.clone().add(V3(-34,30,42)));}
+
+// ===== Placing a sheet by matching points with a placed sheet =====
+const MDPI=60;let MATCH=null;
+function placedSheets(){return(PRJ&&PRJ.sheets||[]).filter(s=>s.registered&&s.document_id);}
+function pageImg(doc,page){return`${API}/api/documents/${doc}/pages/${page}.png?dpi=${MDPI}`;}
+function openMatch(doc,page,id){const refs=placedSheets();if(!refs.length){toast('Nothing is placed yet to match against');return;}
+  MATCH={doc,page:+page,id,ref:refs[0],taps:[],zoom:1};renderMatch();$('#matchBox').scrollIntoView({block:'nearest'});}
+function renderMatch(){const box=$('#matchBox');if(!MATCH){box.hidden=true;box.innerHTML='';return;}box.hidden=false;const M=MATCH,n=M.taps.length,want=n%2===0?'this':'ref',pt=Math.floor(n/2)+1;
+  const refs=placedSheets(),dots=w=>M.taps.map((t,i)=>t.w===w?`<span class="dot" style="left:${t.fx*100}%;top:${t.fy*100}%">${Math.floor(i/2)+1}</span>`:'').join('');
+  box.innerHTML=`<div class="mhead"><b>Place ${esc(M.id)}</b><span class="small muted">Zoom <button class="btn sm" data-act="mzoom" data-z="-1">−</button><button class="btn sm" data-act="mzoom" data-z="1">+</button></span></div>
+    <p class="note">Tap the same spot on both sheets: a manhole, a road or pad corner, a property corner. Then a second spot, far from the first.</p>
+    <div class="mhead"><span class="small muted">${esc(M.id)}</span></div><div class="mimg ${want==='this'&&n<4?'next':''}" data-w="this"><img alt="Sheet ${esc(M.id)}" src="${pageImg(M.doc,M.page)}" style="width:${M.zoom*100}%">${dots('this')}</div>
+    <div class="mhead"><span class="small muted">Match with</span><select id="mRef" aria-label="Placed sheet to match with">${refs.map(r=>`<option value="${r.document_id}:${r.page}"${r===M.ref?' selected':''}>${esc(r.id)} · ${esc(r.title)}</option>`).join('')}</select></div>
+    <div class="mimg ${want==='ref'&&n<4?'next':''}" data-w="ref"><img alt="Sheet ${esc(M.ref.id)}" src="${pageImg(M.ref.document_id,M.ref.page)}" style="width:${M.zoom*100}%">${dots('ref')}</div>
+    <p class="note" id="mStat">${n>=4?'Both points matched. Place the sheet, or undo to adjust.':`Point ${pt}: tap it on ${want==='this'?esc(M.id):esc(M.ref.id)}.`}</p>
+    <div class="row-btns"><button class="btn" data-act="mundo"${n?'':' disabled'}>Undo</button><button class="btn" data-act="mcancel">Cancel</button><button class="btn pri" data-act="msave"${n>=4?'':' disabled'}>Place sheet</button></div>`;
+  box.querySelector('#mRef').onchange=e=>{const[d,p]=e.target.value.split(':');M.ref=refs.find(r=>r.document_id===d&&r.page===+p);M.taps=[];renderMatch();};
+  box.querySelectorAll('.mimg').forEach(div=>div.querySelector('img').addEventListener('click',e=>{const w=div.dataset.w,want2=M.taps.length%2===0?'this':'ref';
+    if(M.taps.length>=4){toast('Both points are matched; undo to change one');return;}
+    if(w!==want2){toast(`Tap point ${Math.floor(M.taps.length/2)+1} on ${want2==='this'?M.id:M.ref.id} next`);return;}
+    const img=e.target;if(!img.complete||!img.naturalWidth){toast('The sheet is still loading');return;}
+    const fx=e.offsetX/img.clientWidth,fy=e.offsetY/img.clientHeight;
+    M.taps.push({w,fx,fy,x:fx*img.naturalWidth*72/MDPI,y:fy*img.naturalHeight*72/MDPI});updateMatch();}));
+  updateMatch();}
+function updateMatch(){const M=MATCH,box=$('#matchBox');if(!M)return;const n=M.taps.length,want=n%2===0?'this':'ref';
+  box.querySelectorAll('.mimg').forEach(div=>{div.querySelectorAll('.dot').forEach(d=>d.remove());div.classList.toggle('next',div.dataset.w===want&&n<4);
+    M.taps.forEach((t,i)=>{if(t.w!==div.dataset.w)return;const d=document.createElement('span');d.className='dot';d.style.left=t.fx*100+'%';d.style.top=t.fy*100+'%';d.textContent=Math.floor(i/2)+1;div.appendChild(d);});});
+  $('#mStat').textContent=n>=4?'Both points matched. Place the sheet, or undo to adjust.':`Point ${Math.floor(n/2)+1}: tap it on ${want==='this'?M.id:M.ref.id}.`;
+  box.querySelector('[data-act=mundo]').disabled=!n;box.querySelector('[data-act=msave]').disabled=n<4;}
+async function saveMatch(){const M=MATCH,t=M.taps,pairs=[[t[0].x,t[0].y,t[1].x,t[1].y],[t[2].x,t[2].y,t[3].x,t[3].y]];
+  try{toast('Placing…');const r=await api(`/api/projects/${PRJ.id}/match`,jsonOpts('PUT',{document_id:M.doc,page:M.page,ref_document_id:M.ref.document_id,ref_page:M.ref.page,pairs}));
+    MATCH=null;renderMatch();await refresh(r,`${M.id} placed`);lastPaint='';buildSite();buildUtil();}catch(err){toast(err.message);}}
 
 // ===== Plans panel (projects, upload, review, issues, calibration) =====
 const fname=f=>({inv_up:'upstream invert',inv_dn:'downstream invert',rim:'rim',material:'material',type:'type',cover:'cover',dia_in:'diameter'})[f]||f;
@@ -713,11 +791,14 @@ function renderReview(){if(!PRJ)return;const sc=AN.status_counts||{};const v=(sc
   $('#issList').innerHTML=iss.length?iss.slice().sort((a,b)=>order[a.severity]-order[b.severity]).slice(0,80).map(i=>`<div class="issue"><span class="sev ${i.severity}">${i.severity}</span><span>${esc(i.message)}${i.object_id&&getObj(i.object_id)?` <button class="btn sm" data-act="sel" data-id="${esc(i.object_id)}">Show</button>`:''}</span></div>`).join(''):'<p class="note">No issues found.</p>';
   $('#xList').innerHTML=crossings.length?crossings.map(c=>`<li><button class="item ${c.severity==='conflict'?'bad':''}" data-act="cross" data-id="${c.id}"><span class="t">${c.upper} over ${c.lower}</span><span class="pill ${c.severity==='conflict'?'warn':c.severity==='tight'?'ai':'v'}">${inch(c.clearance_ft)} clear</span><span class="s">${where(c.x,c.z)}. ${c.severity==='clear'?'Clears typical separation.':'Required clearance must be verified against project specs.'}</span></button></li>`).join(''):'<li class="note">No crossings between utilities with known locations and inverts.</li>';
   $('#sheets').innerHTML=PRJ.sheets.length?PRJ.sheets.map(s=>`<div class="calib"><b>${esc(s.id)}</b><span>${esc(s.title)}<small>${esc(s.category.replace('_',' '))} · ${s.scale_ft_per_in?`1″ = ${s.scale_ft_per_in}′`:'no scale'}${s.document_id?' · '+(s.registered?'placed in model':'not placed'):''} · ${esc(s.notes)}</small></span><span></span>
-      ${s.document_id&&!PRJ.demo?`<span class="sc"><span class="small muted">Scale 1″ =</span><input type="number" inputmode="decimal" value="${s.scale_ft_per_in||''}" aria-label="Feet per inch for ${esc(s.id)}"><span class="small muted">ft</span><button class="btn sm" data-act="scale" data-doc="${s.document_id}" data-page="${s.page}">Set</button></span>`:''}</div>`).join(''):'<p class="note">No sheets yet. Upload a PDF plan set.</p>';
+      ${s.document_id&&!PRJ.demo?`<span class="sc"><span class="small muted">Scale 1″ =</span><input type="number" inputmode="decimal" value="${s.scale_ft_per_in||''}" aria-label="Feet per inch for ${esc(s.id)}"><span class="small muted">ft</span><button class="btn sm" data-act="scale" data-doc="${s.document_id}" data-page="${s.page}">Set</button>${!s.registered&&s.scale_ft_per_in&&placedSheets().length?`<button class="btn sm pri" data-act="place" data-doc="${s.document_id}" data-page="${s.page}" data-id="${esc(s.id)}">Place</button>`:''}</span>`:''}</div>`).join(''):'<p class="note">No sheets yet. Upload a PDF plan set.</p>';
+  const IS=PRJ.imported_surfaces||[],RL={existing:'Existing ground',proposed:'Finished grade',ignore:'Not used'};$('#surfBox').hidden=!IS.length;
+  $('#surfs').innerHTML=IS.map(s=>`<div class="calib"><b>${s.used?'In use':'—'}</b><span>${esc(s.name)}<small>${s.points.toLocaleString()} points · ${s.faces.toLocaleString()} triangles${s.desc?' · '+esc(s.desc):''}${s.role&&s.role_source==='name'?' · role read from its name':''}</small></span><span></span>
+      <span class="sc"><span class="small muted">Role</span><select data-act="role" data-doc="${s.document_id}" data-i="${s.index}" aria-label="Role of surface ${esc(s.name)}"${PRJ.demo?' disabled':''}>${s.role?'':'<option value="" selected>Choose…</option>'}${Object.entries(RL).map(([k,l])=>`<option value="${k}"${s.role===k?' selected':''}>${l}</option>`).join('')}</select></span></div>`).join('');
   const d=PRJ.datum||{};$('#dVert').value=d.vertical||'';$('#dOff').value=d.elevation_offset_ft||0;$('#dEpsg').value=d.epsg||'';$('#dHoriz').textContent='Horizontal: '+(d.horizontal||'');
   $('#datumForm').querySelectorAll('input,button').forEach(el=>el.disabled=!!PRJ.demo);
-  $('#docList').innerHTML=(PRJ.documents||[]).map(d=>`<li><span>${esc(d.filename)} · ${d.pages} pp${d.vision_used?' · vision':''}</span><span class="st ${d.status}">${d.status}</span></li>`).join('')+(PRJ.documents||[]).filter(d=>d.error).map(d=>`<li class="note">${esc(d.error)}</li>`).join('');
-  $('#uplLbl').hidden=!!PRJ.demo;$('#uplNote').textContent=PRJ.demo?'This is the built-in demo. Create a new project to upload your own plans.':'PDF civil plan sets: grading, storm, sanitary, water, roadway, profiles. Everything read is flagged for your confirmation.';
+  $('#docList').innerHTML=(PRJ.documents||[]).map(d=>`<li><span>${esc(d.filename)} · ${/\.xml$/i.test(d.filename)?d.pages+' surface'+(d.pages===1?'':'s'):d.pages+' pp'}${d.vision_used?' · vision':''}</span><span class="st ${d.status}">${d.status}</span></li>`).join('')+(PRJ.documents||[]).filter(d=>d.error).map(d=>`<li class="note">${esc(d.error)}</li>`).join('');
+  $('#uplLbl').hidden=!!PRJ.demo;$('#uplNote').textContent=PRJ.demo?'This is the built-in demo. Create a new project to upload your own plans.':'PDF civil plan sets (grading, storm, sanitary, water, roadway, profiles) and LandXML TIN surfaces. Everything read is flagged for your confirmation.';
   $('#prjName').innerHTML=esc(PRJ.name)+(PRJ.demo?'<span class="demo-tag">DEMO DATA</span>':'');
   const ew=AN.earthwork||{};if(ew.available){$('#cutV').textContent=n0(ew.cut_cy);$('#fillV').textContent=n0(ew.fill_cy);$('#netV').textContent=(ew.net_cy>0?'+':'−')+n0(Math.abs(ew.net_cy));$('#ewBox').title=ew.method;}
   else{$('#cutV').textContent='—';$('#fillV').textContent='—';$('#netV').textContent='—';$('#ewBox').title=ew.reason||'';}
@@ -726,7 +807,7 @@ $('#datumForm').addEventListener('submit',async e=>{e.preventDefault();try{const
   await refresh(await api(`/api/projects/${PRJ.id}/datum`,jsonOpts('PUT',body)),'Datum saved; model rebuilt');buildSite();buildUtil();}catch(err){toast(err.message);}});
 async function loadProjects(selectId){const list=await api('/api/projects');$('#prjSel').innerHTML=list.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.demo?' (demo)':''}</option>`).join('');
   const id=selectId||store.get('gv.project')||(list.find(p=>!p.demo)||list[0]||{}).id;if(id){$('#prjSel').value=id;await openProject(id);}}
-async function openProject(id){const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
+async function openProject(id){MATCH=null;renderMatch();const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
   S={};PRJ.structures.forEach(s=>S[s.id]=s);PIPES=PRJ.pipes;LINES={};PRJ.lines.forEach(l=>LINES[l.id]=l);lastPaint='';buildSite();buildUtil();renderInspect();renderReview();
   const empty=!PRJ.structures.length&&!PRJ.existing&&!PRJ.proposed;showBanner(empty?`<b>No model yet.</b> Open <b>Plans</b> and upload a PDF plan set. TerraVision reads sheet numbers, scales, contours, spot elevations, structures, rims, inverts and pipe callouts, then builds the 3D model from what it finds.`:'');
   setStage(st.stage,true);setMode(PRJ.structures.length?'xray':'bird');const h=homePose();camera.position.copy(h.p);controls.target.copy(h.t);st.tween=null;
@@ -738,10 +819,14 @@ $('#newPrjForm').addEventListener('submit',async e=>{e.preventDefault();const n=
 $('#upl').addEventListener('change',async e=>{const f=e.target.files[0];e.target.value='';if(!f||!PRJ)return;const fd=new FormData();fd.append('file',f);
   $('#uplNote').textContent=`Uploading ${f.name}…`;try{const r=await api(`/api/projects/${PRJ.id}/documents`,{method:'POST',body:fd});pollDoc(r.id,f.name);}catch(err){$('#uplNote').textContent='Upload failed: '+err.message;}});
 async function pollDoc(did,name){const t0=Date.now();for(;;){await new Promise(r=>setTimeout(r,1200));let d;try{d=await api(`/api/documents/${did}`);}catch(e){$('#uplNote').textContent=e.message;return;}
-  if(d.status==='done'){const sheets=d.sheets.map(s=>`${s.sheet_id||'p'+(s.page+1)} (${s.category.replace('_',' ')})`).join(', ');$('#uplNote').textContent=`Read ${d.pages} pages: ${sheets}.`;await openProject(PRJ.id);openTab('review');
+  // reloading the project redraws the Plans panel, so the result is written after it
+  if(d.status==='done'&&d.kind==='landxml'){await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.surfaces.length} surface${d.surfaces.length===1?'':'s'}: ${d.surfaces.map(s=>s.name).join(', ')}.`;
+    const used=(PRJ.imported_surfaces||[]).filter(s=>s.used).map(s=>`<b>${esc(s.name)}</b> as the ${s.role==='existing'?'existing ground':'finished grade'}`);
+    say('a',`Imported <b>${esc(name)}</b>. ${used.length?'Using '+used.join(' and ')+'.':'No surface could be assigned from its name; choose roles in Plans → Imported surfaces.'}`);return;}
+  if(d.status==='done'){const sheets=d.sheets.map(s=>`${s.sheet_id||'p'+(s.page+1)} (${s.category.replace('_',' ')})`).join(', ');await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.pages} pages: ${sheets}.`;
     say('a',`Finished reading <b>${esc(name)}</b>: ${d.pages} pages, ${PRJ.structures.length} structures, ${PIPES.length} pipes${PRJ.proposed?', a finished-grade surface':''}${PRJ.existing?', an existing surface':''}. ${(AN.review||[]).length} values need your confirmation and ${(AN.issues||[]).filter(i=>i.severity!=='info').length} issues are listed in Plans.`);return;}
   if(d.status==='failed'){$('#uplNote').textContent='Processing failed: '+(d.error||'unknown error');return;}
-  $('#uplNote').textContent=`${d.status==='queued'?'Queued':'Reading'} ${name}: ${d.pages} pages… ${Math.round((Date.now()-t0)/1000)}s`;}}
+  $('#uplNote').textContent=`${d.status==='queued'?'Queued':'Reading'} ${name}${d.kind==='pdf'?`: ${d.pages} pages`:''}… ${Math.round((Date.now()-t0)/1000)}s`;}}
 function showBanner(html){const b=$('#banner');b.innerHTML=html;b.hidden=!html;}
 
 // ===== Excavation simulator (quantities from the API) =====

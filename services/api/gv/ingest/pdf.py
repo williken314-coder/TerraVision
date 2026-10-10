@@ -18,42 +18,65 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
-try:
-    import fitz  # PyMuPDF
-except ImportError:  # pragma: no cover - lets the pure-text helpers be tested without PyMuPDF
-    fitz = None
+import numpy as np
 
+from . import contours, control, ocr
+from .roadway import chain_segments, edge_label_kind
+
+try:
+    import pymupdf as fitz  # PyMuPDF >= 1.24
+except ImportError:  # pragma: no cover
+    try:
+        import fitz  # older PyMuPDF
+    except ImportError:  # lets the pure-text helpers be tested without PyMuPDF
+        fitz = None
+
+SHEET_ID = re.compile(r"[A-Z]{1,3}-?\d{1,3}(?:\.\d{1,2})?[A-Z]?")  # G03, C13, RW02, IR01, C-4.0, C101
+FINISHED_TITLE = re.compile(r"FINISH(ED)?\s+GRADE|PROPOSED\s+(GRADE|SURFACE|CONTOURS)|DESIGN\s+SURFACE", re.I)
+TB_JUNK = re.compile(r"\.DWG\b|\bSCALE\b|\bSIGNED\b|\d{1,2}/\d{1,2}/\d{2,4}|^\s*[\d.\-/\s]+\s*$|SHEET\s+NO|DWG\s+NO|DRAWING\s+NO|\bREVISIONS?\b", re.I)
 SHEET_NO = re.compile(r"\b([CEALSUG])-?\s?(\d{1,2}\.\d{1,2})\b")
 SCALE_IMP = re.compile(r"1\s*(?:\"|”|IN\.?|INCH)\s*=\s*(\d+(?:\.\d+)?)\s*(?:'|’|FT\.?|FEET)", re.I)
 SCALE_RATIO = re.compile(r"\bSCALE\s*:?\s*1\s*:\s*(\d{2,5})\b", re.I)
-STRUCT_ID = re.compile(r"\b(CB|SMH|STMH|MH|HW|FES|FH|INL|DI|WV|TX)\s?-?\s?(\d{1,3}[A-Z]?)\b")
+STRUCT_ID = re.compile(r"\b(CB|SMH|STMH|MH|HW|FES|FH|INL|DI|WV|TX)\s?(?:#|NO\.?)?\s?-?\s?(\d{1,3}[A-Z]?)\b")  # CB-4, CB 4, CB #4, CB NO. 4
 RIM = re.compile(r"\b(?:RIM|TOP|TG|GRATE|T\.?G\.?)\s*(?:EL\.?|ELEV\.?)?\s*[=:]?\s*(\d{3,4}\.\d{1,3})", re.I)
 INV = re.compile(r"\bI(?:NV|E)\.?\s*(IN|OUT)?\s*(?:\(?\b([NSEW]{1,2})\b\)?)?\s*(?:EL\.?)?\s*[=:]?\s*(\d{3,4}\.\d{1,3})", re.I)
 PIPE = re.compile(r"(?:(\d+(?:\.\d+)?)\s*(?:LF|L\.F\.)\s*(?:OF\s*)?)?(\d{1,2})\s*(?:\"|”|IN\.?|-INCH)\s*(RCP|PVC|DIP|DI|HDPE|CMP|PP|CPEP)\b[^@\n]{0,40}?@\s*(-?\d+\.\d+)\s*%", re.I)
 SPOT = re.compile(r"\b(FG|TC|BC|FFE|FF|EG|TW|BW|HP|LP|FL|PAD)\s*[=:]?\s*(\d{3,4}\.\d{1,2})\b|\b(\d{3,4}\.\d{1,2})\s*(FG|TC|BC|FFE|FF|EG|TW|BW|FL|PAD)\b", re.I)
 CONTOUR_LABEL = re.compile(r"^\s*(\d{3,4})(?:\.0)?\s*$")
 STATION = re.compile(r"\bSTA\.?\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
+BARE_STATION = re.compile(r"^\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)\s*$")  # tick labels along a centerline
+MATCHLINE = re.compile(r"MATCH\s*-?\s*LINE\b[^+]{0,20}?(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
+SEE_SHEET = re.compile(r"SEE\s+(?:SHEET|SHT\.?|DWG\.?)\s*([CEALSUG])-?\s?(\d{1,2}\.\d{1,2})", re.I)
+PAVE_LAYER = re.compile(r"(\d+(?:\.\d+)?(?:[\s-]\d/\d|½)?|\d/\d|½)\s*(?:\"|”|IN\.?|INCH(?:ES)?)\s*(?:THICK\s+)?(?:OF\s+)?"
+                        r"((?:HOT[\s-]MIX\s+)?ASPHALT(?:IC)?(?:\s+CONCRETE)?(?:\s+(?:SURFACE|BASE|BINDER|INTERMEDIATE)(?:\s+COURSE)?)?"
+                        r"|HMA(?:\s+(?:SURFACE|BASE|BINDER|INTERMEDIATE)(?:\s+COURSE)?)?|A\.?C\.?(?=\s|$|,)|P\.?C\.?C\.?"
+                        r"|(?:PORTLAND\s+CEMENT\s+)?CONCRETE(?:\s+PAVEMENT)?|(?:CRUSHED\s+)?AGGREGATE\s+(?:SUB)?BASE(?:\s+COURSE)?"
+                        r"|CLASS\s+\w+\s+(?:AGGREGATE\s+)?(?:SUB)?BASE|A\.?B\.?(?=\s|$|,)|C?ABC|SUB-?BASE|GRAVEL\s+BASE|CRUSHED\s+(?:STONE|ROCK)(?:\s+BASE)?)", re.I)
 
 CATEGORIES = [
-    ("existing", ["EXISTING CONDITIONS", "TOPOGRAPHIC", "SURVEY", "EXISTING SITE"]),
-    ("demolition", ["DEMOLITION", "EROSION", "SEDIMENT", "SWPPP"]),
+    ("existing", ["EXISTING CONDITIONS", "TOPOGRAPHIC", "SURVEY", "EXISTING SITE", "EXISTING GRADE", "EXISTING SURFACE", "EXISTING GROUND"]),
+    ("demolition", ["DEMOLITION", "EROSION", "SEDIMENT", "SWPPP", "TESC"]),
     ("storm_profile", ["STORM PROFILE", "STORM SEWER PROFILE", "DRAINAGE PROFILE", "STORM DRAIN PROFILE"]),
     ("sanitary_profile", ["SANITARY PROFILE", "SEWER PROFILE"]),
     ("cross_section", ["CROSS SECTION", "CROSS-SECTION"]),
-    ("grading", ["GRADING"]),
+    ("details", ["DETAIL"]),  # before the systems: "STORM DETAILS" is not a storm plan
+    ("wall", ["RETAINING WALL"]),
+    ("grading", ["GRADING", "FINISHED GRADE", "PROPOSED GRADE", "FINISH GRADE"]),
     ("storm", ["STORM", "DRAINAGE"]),
     ("sanitary", ["SANITARY", "SEWER"]),
     ("water", ["WATER"]),
-    ("utility", ["UTILITY", "UTILITIES"]),
-    ("roadway", ["ROADWAY", "PLAN & PROFILE", "PLAN AND PROFILE", "PAVING", "STREET"]),
+    ("utility", ["UTILITY", "UTILITIES", "IRRIGATION"]),
+    ("roadway", ["ROADWAY", "PLAN & PROFILE", "PLAN AND PROFILE", "PAVING", "STREET", "ALIGNMENT CONTROL"]),
     ("site", ["SITE PLAN", "SITE DEVELOPMENT", "LAYOUT", "DIMENSION"]),
-    ("details", ["DETAIL"]),
     ("electrical", ["ELECTRICAL", "LIGHTING"]),
     ("landscape", ["LANDSCAPE", "PLANTING"]),
     ("cover", ["COVER", "INDEX", "TITLE SHEET"]),
 ]
+CURVE_STEPS = 6
+ROAD_CATEGORIES = {"roadway"}  # plus any plan sheet with station labels
 PLAN_CATEGORIES = {"grading", "storm", "sanitary", "water", "utility", "roadway", "site", "existing"}
 PROFILE_CATEGORIES = {"storm_profile", "sanitary_profile"}
 
@@ -128,6 +151,11 @@ class SheetReport:
     text_spans: int
     candidates: list[Candidate] = field(default_factory=list)
     pipe_segments: list[list[float]] = field(default_factory=list)  # thick plan lines [x0,y0,x1,y1]
+    linework: list[dict] = field(default_factory=list)  # chained lines on roadway sheets: {pts, w, dashed, len}
+    scale_source: str | None = None  # "text", or "ocr" when read from stroke-drawn (SHX) text
+    views: list[dict] = field(default_factory=list)  # view titles with the scale printed under them (OCR)
+    marks: list[list[float]] = field(default_factory=list)  # small dark filled marks [x, y, size] in the drawing area
+    control: list[dict] = field(default_factory=list)  # printed N/E coordinates with the point their leader marks
     symbols: list[list[float]] = field(default_factory=list)  # [x, y, size, kind(0 rect/1 circle)]
     notes: list[str] = field(default_factory=list)
 
@@ -165,10 +193,15 @@ def _geometry(page):
     segs: list[Seg] = []
     symbols: list[Symbol] = []
     polys: list[Polyline] = []
+    marks: list[list[float]] = []
     for d in page.get_drawings():
         width = d.get("width") or 0.0
         dashed = _is_dashed(d)
         r = d.get("rect")
+        fill = d.get("fill")
+        # small dark filled marks (survey targets, control points): used to tell sheets drawn in the same view
+        if fill is not None and r is not None and 4 <= r.width <= 40 and abs(r.width - r.height) <= 1.0 and sum(fill[:3]) / 3 < 0.35 and len(marks) < 400:
+            marks.append([round((r.x0 + r.x1) / 2, 2), round((r.y0 + r.y1) / 2, 2), round(r.width, 2)])
         items = d["items"]
         kinds = {it[0] for it in items}
         if r is not None and 2.5 <= max(r.width, r.height) <= 22 and abs(r.width - r.height) <= max(r.width, r.height) * 0.6:
@@ -189,14 +222,22 @@ def _geometry(page):
                     pts = [(p1.x, p1.y)]
                 pts.append((p2.x, p2.y))
             elif it[0] == "c":
-                p1, p4 = it[1], it[4]
-                segs.append(Seg(p1.x, p1.y, p4.x, p4.y, width, dashed))
-                if not pts:
+                p1, c1, c2, p4 = it[1], it[2], it[3], it[4]
+                if not pts or (abs(pts[-1][0] - p1.x) > 0.01 or abs(pts[-1][1] - p1.y) > 0.01):
+                    if len(pts) >= 2:
+                        polys.append(Polyline(pts, width, dashed))
                     pts = [(p1.x, p1.y)]
-                pts.append((p4.x, p4.y))
+                prev = (p1.x, p1.y)
+                for k in range(1, CURVE_STEPS + 1):  # follow the curve, not its chord
+                    t = k / CURVE_STEPS
+                    a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t * t, t ** 3
+                    q = (a * p1.x + b * c1.x + c * c2.x + d * p4.x, a * p1.y + b * c1.y + c * c2.y + d * p4.y)
+                    segs.append(Seg(prev[0], prev[1], q[0], q[1], width, dashed))
+                    pts.append(q)
+                    prev = q
         if len(pts) >= 2:
             polys.append(Polyline(pts, width, dashed))
-    return segs, symbols, polys
+    return segs, symbols, polys, marks
 
 
 def classify(text: str) -> str:
@@ -230,22 +271,66 @@ def _dist_point_poly(x, y, pts):
 
 # ----- page reading ---------------------------------------------------------
 
-def read_page(page, index: int) -> SheetReport:
+def read_page(page, index: int, spans: list[TextSpan] | None = None, common: set[str] | frozenset = frozenset()) -> SheetReport:
     w, h = page.rect.width, page.rect.height
-    segs, symbols, polys = _geometry(page)
-    return build_report(index, w, h, _spans(page), segs, symbols, polys)
+    segs, symbols, polys, marks = _geometry(page)
+    r_spans = _spans(page) if spans is None else spans
+    r = build_report(index, w, h, r_spans, segs, symbols, polys, common)
+    r.marks = [m for m in marks if m[0] < w * 0.86]  # not the title block's logos and seals
+    if any(control.NORTH.match(s.text) or control.NE_ONE_LINE.search(s.text) for s in r_spans):
+        r.control = control.read_control(r_spans, segs)
+    return r
 
 
-def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: list[Seg], symbols: list[Symbol], polys: list[Polyline]) -> SheetReport:
+def common_text(pages: list[list[TextSpan]]) -> set[str]:
+    """Text printed on at least half the sheets: the title block's client, project and firm lines."""
+    if len(pages) < 4:
+        return set()
+    n = defaultdict(int)
+    for sp in pages:
+        for t in {s.text for s in sp}:
+            n[t] += 1
+    return {t for t, k in n.items() if k >= len(pages) / 2}
+
+
+def title_block(spans: list[TextSpan], w: float, h: float, common: set[str] | frozenset = frozenset()) -> tuple[str | None, str, str]:
+    """Sheet number, title, and the rest of the title block's own text.
+
+    Handles a title block across the bottom right or as a strip down the right edge, with the title rotated.
+    ``common`` is text printed on most sheets of the set (client, project name, firm): never a title, and kept
+    out of classification, so a project called "... Water System ..." doesn't make every sheet a water sheet.
+    """
+    zone = [s for s in spans if (s.x > w * 0.6 and s.y > h * 0.7) or s.x > w * 0.88]
+    own = [s for s in zone if s.text not in common]
+    ids = [s for s in zone if SHEET_ID.fullmatch(s.text.strip()) and s.size >= 9 and s.x > w * 0.75 and s.y > h * 0.75]
+    sid_span = min(ids, key=lambda s: (-round(s.size), math.hypot(w - s.x, h - s.y)), default=None)
+    if sid_span:
+        sheet_id = sid_span.text.strip()
+    else:  # older layouts: "C-4.0" somewhere in the title block text
+        m = SHEET_NO.search("\n".join(s.text for s in zone))
+        sheet_id = f"{m.group(1)}-{m.group(2)}" if m else None
+    cands = [s for s in own if s is not sid_span and not TB_JUNK.search(s.text) and not SHEET_ID.fullmatch(s.text.strip()) and len(s.text.strip()) > 2]
+    title = ""
+    if cands:
+        top = max(cands, key=lambda s: (round(s.size, 1), len(s.text)))
+        vertical = (top.bbox[3] - top.bbox[1]) > (top.bbox[2] - top.bbox[0])
+        lines = [s for s in cands if abs(s.size - top.size) <= 0.05 * top.size
+                 and (abs(s.x - top.x) <= top.size * 3 if vertical else abs(s.y - top.y) <= top.size * 3)
+                 and (abs(s.y - top.y) <= h * 0.3 if vertical else abs(s.x - top.x) <= w * 0.3)]
+        title = " ".join(s.text.strip() for s in sorted(lines, key=lambda s: s.x if vertical else s.y))
+    return sheet_id, title, "\n".join(s.text for s in own)
+
+
+def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: list[Seg], symbols: list[Symbol], polys: list[Polyline],
+                 common: set[str] | frozenset = frozenset()) -> SheetReport:
     """Everything after raw extraction. Separate from PyMuPDF so it can be tested on recorded layouts."""
-    tb = [s for s in spans if s.x > w * 0.6 and s.y > h * 0.7] or spans
-    tb_text = "\n".join(s.text for s in tb)
-    m = SHEET_NO.search(tb_text) or SHEET_NO.search("\n".join(s.text for s in spans))
-    sheet_id = f"{m.group(1)}-{m.group(2)}" if m else None
-    title_span = max((s for s in tb if not SHEET_NO.fullmatch(s.text.strip()) and not SCALE_IMP.search(s.text)),
-                     key=lambda s: (s.size, len(s.text)), default=None)
-    title = title_span.text if title_span else ""
-    category = classify(title + "\n" + tb_text)
+    sheet_id, title, tb_text = title_block(spans, w, h, common)
+    # the title says what the sheet is; loose title-block text only counts on a numbered sheet (not a cover)
+    # Without a drawing number (a cover, a stray page) the "title" is guesswork, so only a cover is recognised.
+    if not sheet_id:
+        category = "cover" if classify(title + "\n" + tb_text) == "cover" else "unknown"
+    else:
+        category = classify(title) if classify(title) != "unknown" else classify(tb_text)
     scale, scale_text = parse_scale("\n".join(s.text for s in spans))
 
     report = SheetReport(page=index, sheet_id=sheet_id, title=title, category=category, scale_ft_per_in=scale,
@@ -256,7 +341,7 @@ def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: li
         return report
 
     size_ref = max(12.0, min(w, h) * 0.02)
-    report.candidates = extract_candidates(spans, symbols, polys, index, size_ref, category)
+    report.candidates = extract_candidates(spans, symbols, polys, index, size_ref, category, title)
     # thick, solid lines on plan sheets are pipe candidates
     if category in PLAN_CATEGORIES:
         widths = sorted(s.width for s in segs if s.length > 6)
@@ -264,12 +349,17 @@ def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: li
             thick = max(1.2, widths[int(len(widths) * 0.9)] * 0.95)
             report.pipe_segments = [[s.x0, s.y0, s.x1, s.y1] for s in segs if s.width >= thick and not s.dashed and s.length > 8]
     report.symbols = [[s.x, s.y, s.size, 1 if s.kind == "circle" else 0] for s in symbols]
+    # roadway linework: chained so CAD dash-by-dash linetypes become whole lines again
+    n_sta = sum(1 for c in report.candidates if c.kind == "station")
+    if category in ROAD_CATEGORIES or (category in PLAN_CATEGORIES and n_sta >= 2):
+        lines = chain_segments([(s.x0, s.y0, s.x1, s.y1, s.width, s.dashed) for s in segs], min_len=max(60.0, size_ref * 2.5))
+        report.linework = sorted(lines, key=lambda l: -l["len"])[:600]
     if category in PLAN_CATEGORIES and not scale:
         report.notes.append("Plan sheet without a readable scale. Set the scale before using its geometry.")
     return report
 
 
-def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[Candidate]:
+def extract_candidates(spans, symbols, polys, page, size_ref, category, title: str = "") -> list[Candidate]:
     def bb(s):
         return [round(v, 2) for v in s.bbox]
 
@@ -330,7 +420,26 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[
         c.confidence = round(min(found), 2) if found else 0.3
 
     out: list[Candidate] = list(structs)
+    roadish = category in ROAD_CATEGORIES or category in PLAN_CATEGORIES
     for s in spans:
+        if roadish:
+            m = MATCHLINE.search(s.text)
+            if m:
+                ref = SEE_SHEET.search(s.text) or next((SEE_SHEET.search(o.text) for o in spans if o is not s and abs(o.x - s.x) < size_ref * 6
+                                                        and 0 <= o.y - s.y < size_ref * 2 and SEE_SHEET.search(o.text)), None)
+                out.append(Candidate("matchline", m.group(0), {"station": int(m.group(1)) * 100 + float(m.group(2)),
+                                                               "sheet_ref": f"{ref.group(1).upper()}-{ref.group(2)}" if ref else None}, page, s.x, s.y, bb(s), s.text, 0.9))
+                continue
+            m = BARE_STATION.match(s.text)
+            if m and not STATION.search(s.text):
+                out.append(Candidate("station", s.text.strip(), {"station": int(m.group(1)) * 100 + float(m.group(2))}, page, s.x, s.y, bb(s), s.text, 0.8))
+            if len(s.text) <= 30:
+                k = edge_label_kind(s.text)
+                if k:
+                    out.append(Candidate("road_label", k, {"size": round(s.size, 2)}, page, s.x, s.y, bb(s), s.text, 0.8))
+        for m in PAVE_LAYER.finditer(s.text):
+            out.append(Candidate("pavement_layer", m.group(0).strip(), {"thickness_in": _inches(m.group(1)), "material": " ".join(m.group(2).upper().split())},
+                                 page, s.x, s.y, bb(s), s.text, 0.75))
         for m in PIPE.finditer(s.text):
             out.append(Candidate("pipe_callout", m.group(0).strip(), {
                 "length_lf": float(m.group(1)) if m.group(1) else None, "dia_in": float(m.group(2)),
@@ -343,31 +452,96 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category) -> list[
             out.append(Candidate("station", m.group(0), {"station": int(m.group(1)) * 100 + float(m.group(2))}, page, s.x, s.y, bb(s), s.text, 0.9))
 
     # contour labels: a bare whole-number elevation sitting on a polyline
-    if category in ("grading", "existing", "site", "roadway"):
+    # not roadway sheets: on plan & profile sheets the profile grid's elevation labels sit on grid lines
+    # a sheet titled "Existing grade" or "Finished grade" says what its contours are, whatever their linetype
+    surface_role = "existing" if category == "existing" else "proposed" if FINISHED_TITLE.search(title) and not re.search(r"EXIST", title, re.I) else None
+    if category in ("grading", "existing", "site"):
         long_polys = [p for p in polys if p.length > size_ref * 3 and len(p.pts) >= 3]
+        labels: dict[int, set] = defaultdict(set)
         for s in spans:
             m = CONTOUR_LABEL.match(s.text)
             if not m or not long_polys:
                 continue
             best, bd = None, float("inf")
-            for p in long_polys:
+            for i, p in enumerate(long_polys):
                 d = _dist_point_poly(s.x, s.y, p.pts)
                 if d < bd:
-                    best, bd = p, d
-            if best and bd < s.size * 1.2:
+                    best, bd = i, d
+            if best is not None and bd < s.size * 1.2:
+                p = long_polys[best]
+                labels[best].add(float(m.group(1)))
                 out.append(Candidate("contour", m.group(1), {
-                    "elev": float(m.group(1)), "dashed": best.dashed,
-                    "pts": [[round(x, 2), round(y, 2)] for x, y in best.pts]}, page, s.x, s.y, bb(s), s.text,
-                    0.8 if best.dashed or category == "grading" else 0.7))
+                    "elev": float(m.group(1)), "dashed": p.dashed, "surface": surface_role,
+                    "pts": [[round(x, 2), round(y, 2)] for x, y in p.pts]}, page, s.x, s.y, bb(s), s.text,
+                    0.8 if p.dashed or category == "grading" else 0.7))
+        out += _unlabelled_contours(long_polys, labels, page, size_ref, surface_role)
     return out
+
+
+def _unlabelled_contours(long_polys, labels: dict[int, set], page: int, size_ref: float, surface_role) -> list[Candidate]:
+    """Elevations for the contours between the labelled ones, counted from them (gv.ingest.contours).
+
+    Each line style (existing dashed, proposed solid ...) is counted on its own, only against lines of that style.
+    """
+    out = []
+    families = defaultdict(list)
+    for i, p in enumerate(long_polys):
+        families[(p.dashed, round(p.width, 2))].append(i)
+    for fam in families.values():
+        lab = {k: next(iter(labels[i])) for k, i in enumerate(fam) if len(labels.get(i, ())) == 1}
+        if len(lab) < 2:
+            continue
+        got = contours.derive_elevations([np.asarray(long_polys[i].pts, float) for i in fam], lab, reach=size_ref * 2.5)
+        for k, (elev, votes) in got.items():
+            p = long_polys[fam[k]]
+            x, y = p.pts[len(p.pts) // 2]
+            out.append(Candidate("contour", f"{elev:g}", {"elev": elev, "dashed": p.dashed, "surface": surface_role, "derived": True,
+                                                          "pts": [[round(a, 2), round(b, 2)] for a, b in p.pts]},
+                                 page, x, y, [], f"unlabelled contour, counted from the labelled ones ({votes} transects agree)", 0.6))
+    return out
+
+
+def _inches(text: str) -> float:
+    """'8', '1.5', '1-1/2', '1 1/2', '1½', '3/4' -> inches."""
+    total = 0.0
+    for part in re.split(r"[\s-]+", text.replace("½", " 1/2").strip()):
+        if not part:
+            continue
+        if "/" in part:
+            a, b = part.split("/")
+            total += float(a) / float(b)
+        else:
+            total += float(part)
+    return total
 
 
 def read_plan_set(data: bytes) -> list[SheetReport]:
     doc = fitz.open(stream=data, filetype="pdf")
     try:
-        return [read_page(p, i) for i, p in enumerate(doc)]
+        spans = [_spans(p) for p in doc]
+        common = common_text(spans)
+        reports = []
+        for i, p in enumerate(doc):
+            r = read_page(p, i, spans[i], common)
+            if r.scale_ft_per_in:
+                r.scale_source = "text"
+            elif r.has_text_layer and r.category in PLAN_CATEGORIES | ROAD_CATEGORIES:
+                _ocr_scale(p, spans[i], r)
+            reports.append(r)
+        return reports
     finally:
         doc.close()
+
+
+def _ocr_scale(page, spans, r: SheetReport) -> None:
+    """Scales drawn as strokes under the view titles (AutoCAD SHX text), when the text layer has none."""
+    r.views = ocr.view_scales(page, spans, r.width_pt, r.height_pt)
+    v = ocr.pick_sheet_scale(r.views)
+    if not v:
+        return
+    r.scale_ft_per_in, r.scale_source = v["ft_per_in"], "ocr"
+    r.scale_text = f"1\" = {v['ft_per_in']:g}' (read by OCR under “{v['title']}”)"
+    r.notes = [n for n in r.notes if "readable scale" not in n]
 
 
 def page_count(data: bytes) -> int:

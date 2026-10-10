@@ -5,13 +5,17 @@ Then open http://localhost:8000 for the app.
 """
 from __future__ import annotations
 
+import base64
+import hmac
+import math
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -25,11 +29,12 @@ from .demo import build_demo
 from .edits import EditError, FieldEdit, apply_edit
 from .geometry.surface import Grid
 from .geometry.utilities import NotEnoughData, trench_quantities
-from .ingest import raster, vision
+from .ingest import landxml, ocr, raster, vision
 from .ingest.pdf import page_count, render_page_png
 from .models import Datum, Project
-from .processing import process_document, rebuild_project
+from .processing import is_landxml_doc, process_document, rebuild_project
 
+MATCH_SCALE_TOLERANCE = 0.05  # matched points may disagree on distance by this much (tap precision)
 MAX_UPLOAD_MB = int(os.environ.get("GV_MAX_UPLOAD_MB", "200"))
 def _web_dir() -> Path:
     if os.environ.get("GV_WEB_DIR"):
@@ -40,23 +45,42 @@ def _web_dir() -> Path:
 
 WEB_DIR = _web_dir()
 
-app = FastAPI(title="TerraVision API", version="0.2.0")
-app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
-
-
-def get_db():
-    with dbm.SessionLocal() as s:
-        yield s
-
-
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     dbm.init_db()
     with dbm.SessionLocal() as db:
         if not dbm.get_project_row(db, "maple-ridge"):
             demo = build_demo()
             db.add(dbm.ProjectRow(id=demo.id, name=demo.name, model=demo.model_dump(mode="json"), overrides={}))
             db.commit()
+    yield
+
+
+app = FastAPI(title="TerraVision API", version="0.2.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+PASSWORD = os.environ.get("GV_PASSWORD") or None  # set it whenever the app is reachable by anyone but you
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    """With GV_PASSWORD set, everything but the health check asks for it (browser sign-in box, any user name)."""
+    if PASSWORD and request.url.path != "/api/health":
+        ok = False
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                _, _, given = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+                ok = hmac.compare_digest(given.encode(), PASSWORD.encode())
+            except (ValueError, UnicodeDecodeError):
+                ok = False
+        if not ok:
+            return Response("Sign in to TerraVision", status_code=401, headers={"WWW-Authenticate": 'Basic realm="TerraVision", charset="UTF-8"'})
+    return await call_next(request)
+
+
+def get_db():
+    with dbm.SessionLocal() as s:
+        yield s
 
 
 def _load(db: Session, pid: str) -> tuple[dbm.ProjectRow, Project]:
@@ -74,7 +98,7 @@ def _payload(prj: Project) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "vision_available": vision.vision_available(), "opencv_available": raster.OPENCV,
+    return {"ok": True, "vision_available": vision.vision_available(), "opencv_available": raster.OPENCV, "ocr_available": ocr.OCR,
             "database": dbm.DATABASE_URL.split("://")[0], "max_upload_mb": MAX_UPLOAD_MB}
 
 
@@ -130,16 +154,19 @@ async def upload(pid: str, background: BackgroundTasks, file: UploadFile = File(
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File is larger than {MAX_UPLOAD_MB} MB")
-    if not data.startswith(b"%PDF"):
-        raise HTTPException(415, "Only PDF plan sets are supported right now. DXF, LandXML and IFC import are on the roadmap.")
-    try:
-        pages = page_count(data)
-    except Exception as ex:
-        raise HTTPException(422, f"Could not open the PDF: {ex}")
+    if data.startswith(b"%PDF"):
+        try:
+            pages, ext = page_count(data), "pdf"
+        except Exception as ex:
+            raise HTTPException(422, f"Could not open the PDF: {ex}")
+    elif landxml.is_landxml(data):
+        pages, ext = 0, "xml"  # surfaces are counted when the file is read
+    else:
+        raise HTTPException(415, "Upload a PDF plan set or a LandXML surface file (.xml). DXF and IFC import are on the roadmap.")
     did = dbm.new_id("doc")
-    path = dbm.DATA_DIR / "uploads" / f"{did}.pdf"
+    path = dbm.DATA_DIR / "uploads" / f"{did}.{ext}"
     path.write_bytes(data)
-    db.add(dbm.DocumentRow(id=did, project_id=pid, filename=Path(file.filename or "plans.pdf").name[:300], path=str(path), pages=pages, status="queued"))
+    db.add(dbm.DocumentRow(id=did, project_id=pid, filename=Path(file.filename or f"upload.{ext}").name[:300], path=str(path), pages=pages, status="queued"))
     db.commit()
     background.add_task(process_document, did)
     return {"id": did, "status": "queued", "pages": pages}
@@ -151,7 +178,11 @@ def document_status(did: str, db: Session = Depends(get_db)):
     if not d:
         raise HTTPException(404, "No such document")
     reps = db.query(dbm.SheetReportRow).filter_by(document_id=did).order_by(dbm.SheetReportRow.page).all()
-    return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "pages": d.pages, "status": d.status, "error": d.error,
+    if is_landxml_doc(d):
+        return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "landxml", "status": d.status, "error": d.error,
+                "surfaces": [{k: r.report.get(k) for k in ("index", "name", "desc", "points", "faces", "dropped_faces", "role_guess", "units", "epsg", "extent", "elev_range")}
+                             for r in reps]}
+    return {"id": d.id, "project_id": d.project_id, "filename": d.filename, "kind": "pdf", "pages": d.pages, "status": d.status, "error": d.error,
             "vision_used": d.vision_used,
             "sheets": [{"page": r.page, "sheet_id": r.sheet_id, "category": r.category, "title": r.report.get("title"),
                         "scale": r.report.get("scale_text"), "items": len(r.report.get("candidates", [])),
@@ -165,6 +196,8 @@ def page_image(did: str, page: int, dpi: int = Query(72, ge=36, le=300), bbox: O
     d = db.get(dbm.DocumentRow, did)
     if not d:
         raise HTTPException(404, "No such document")
+    if is_landxml_doc(d):
+        raise HTTPException(404, "LandXML documents have no sheet images")
     clip = None
     if bbox:
         x0, y0, x1, y1 = (float(v) for v in bbox.split(","))
@@ -226,8 +259,76 @@ def set_datum(pid: str, d: Datum, db: Session = Depends(get_db)):
     row, prj = _load(db, pid)
     if prj.demo:
         raise HTTPException(400, "The demo project is read-only")
+    if d.false_origin is None:  # the datum form doesn't send it; keep the frame imported data was placed in
+        d.false_origin = prj.datum.false_origin
     prj.datum = d
     row.model = prj.model_dump(mode="json")
+    db.commit()
+    return _payload(rebuild_project(db, pid))
+
+
+class Match(BaseModel):
+    document_id: str
+    page: int
+    ref_document_id: str
+    ref_page: int
+    # [[x_pt, y_pt, ref_x_pt, ref_y_pt], ...]: the same point on this sheet and on the reference sheet
+    pairs: list[list[float]]
+
+
+@app.put("/api/projects/{pid}/match")
+def set_match(pid: str, m: Match, db: Session = Depends(get_db)):
+    """Place a sheet from points a person matched with a sheet that is already placed (or clear it with no pairs)."""
+    row, prj = _load(db, pid)
+    if prj.demo:
+        raise HTTPException(400, "The demo project is read-only")
+    if m.pairs and (len(m.pairs) < 2 or any(len(p) != 4 for p in m.pairs)):
+        raise HTTPException(422, "Match at least two points, each as [x, y, ref_x, ref_y]")
+    if m.pairs:
+        (a, b), (c, d) = m.pairs[0][:2], m.pairs[1][:2]
+        if abs(a - c) + abs(b - d) < 30:
+            raise HTTPException(422, "Pick the two points well apart; points close together can't fix the sheet's direction")
+    key, ref = f"{m.document_id}:{m.page}", f"{m.ref_document_id}:{m.ref_page}"
+    if key == ref:
+        raise HTTPException(422, "Match against a different sheet")
+    if m.pairs:  # the two distances must agree at the sheets' scales, or the points aren't the same spots
+        scale = {s.document_id + ":" + str(s.page): s.scale_ft_per_in for s in prj.sheets if s.document_id}
+        if not scale.get(key) or not scale.get(ref):
+            raise HTTPException(422, "Set both sheets' scales before matching points")
+        (a, b, c, d), (e, f, g, h) = m.pairs[0], m.pairs[1]
+        mine, theirs = math.hypot(e - a, f - b) * scale[key], math.hypot(g - c, h - d) * scale[ref]
+        if theirs <= 0 or abs(mine / theirs - 1) > MATCH_SCALE_TOLERANCE:
+            raise HTTPException(422, f"Those points are {mine / 72:.0f} ft apart on one sheet and {theirs / 72:.0f} ft on the other, "
+                                     "so they aren't the same two spots (or a sheet's scale is wrong). Undo and try again.")
+    ov = dict(row.overrides or {})
+    sheets = dict(ov.get("sheets", {}))
+    entry = dict(sheets.get(key, {}))
+    if m.pairs:
+        entry["match"] = {"ref": ref, "pairs": m.pairs}
+    else:
+        entry.pop("match", None)
+    sheets[key] = entry
+    ov["sheets"] = sheets
+    row.overrides = ov
+    db.commit()
+    return _payload(rebuild_project(db, pid))
+
+
+class SurfaceRole(BaseModel):
+    document_id: str
+    index: int
+    role: Literal["existing", "proposed", "ignore"]
+
+
+@app.put("/api/projects/{pid}/surfaces")
+def set_surface_role(pid: str, body: SurfaceRole, db: Session = Depends(get_db)):
+    """Say whether an imported LandXML surface is the existing ground, the finished grade, or not used."""
+    row, prj = _load(db, pid)
+    if not any(s.document_id == body.document_id and s.index == body.index for s in prj.imported_surfaces):
+        raise HTTPException(404, "No such imported surface in this project")
+    ov = dict(row.overrides or {})
+    ov["surfaces"] = {**ov.get("surfaces", {}), f"{body.document_id}:{body.index}": body.role}
+    row.overrides = ov
     db.commit()
     return _payload(rebuild_project(db, pid))
 

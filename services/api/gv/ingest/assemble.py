@@ -20,9 +20,11 @@ from collections import defaultdict
 import numpy as np
 
 from ..geometry.surface import TIN, Grid
-from ..models import Fact, GridSurface, Issue, Pipe, Sheet, Status, Structure
+from ..geometry.alignment import offset_label, station_label
+from ..models import EDGE_CODES, EDGE_NAMES, Alignment, AlignmentPoint, CorridorTemplate, Fact, GridSurface, Issue, Pipe, RoadEdge, Sheet, Status, Structure
 from .calibration import SheetCalibration, Similarity, fit_similarity, ft_per_pt
-from .pdf import PLAN_CATEGORIES, PROFILE_CATEGORIES, SheetReport
+from .pdf import PLAN_CATEGORIES, PROFILE_CATEGORIES, ROAD_CATEGORIES, SheetReport
+from .roadway import link_by_stationing, read_roadway_sheet
 
 SYSTEM_BY_PREFIX = {"CB": "storm", "INL": "storm", "DI": "storm", "HW": "storm", "FES": "storm", "STMH": "storm",
                     "SMH": "san", "FH": "water", "WV": "water", "TX": "elec"}
@@ -30,6 +32,7 @@ KIND_BY_PREFIX = {"CB": "CB", "INL": "INL", "DI": "INL", "HW": "HW", "FES": "HW"
                   "MH": "MH", "FH": "FH", "WV": "OTHER", "TX": "TX"}
 PROPOSED_CODES = {"FG", "BC", "FL", "PAD", "HP", "LP", "BW"}
 EXISTING_CODES = {"EG"}
+MAX_TIN_EDGE_FT = 250.0  # wider gaps between plan elevations are left empty, not interpolated across
 COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
@@ -61,8 +64,11 @@ def _compass(dx: float, dz: float) -> str:
     return COMPASS[int((ang + 22.5) // 45) % 8]
 
 
-def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = None, elevation_offset: float = 0.0) -> dict:
+def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = None, elevation_offset: float = 0.0,
+             false_origin: list[float] | None = None) -> dict:
+    """``false_origin`` [E0, N0] is subtracted from control-point coordinates (see ``Datum.false_origin``)."""
     overrides = overrides or {}
+    e0, n0 = false_origin or (0.0, 0.0)
     issues: list[Issue] = []
     sheets: list[Sheet] = []
     cals: dict[str, SheetCalibration] = {}
@@ -70,6 +76,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     doc_of: dict[str, str] = {}
 
     # 1. sheets and scale calibration -------------------------------------
+    ocr_scales = []
     for doc_id, r in reports:
         key = sheet_key(doc_id, r.page)
         rep_by_key[key], doc_of[key] = r, doc_id
@@ -80,12 +87,52 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cals[key] = SheetCalibration(key, ft_per_pt(scale) if scale else None, method)
         sheets.append(Sheet(id=sid, title=r.title or "(untitled)", category=r.category, page=r.page, document_id=doc_id,
                             scale_ft_per_in=scale, notes=f"{len(r.candidates)} labelled items, {r.line_segments} line segments"))
+        if r.scale_source == "ocr" and not ov.get("scale_ft_per_in"):
+            ocr_scales.append((sid, r.scale_ft_per_in, r.page))
         for n in r.notes:
             issues.append(Issue(severity="warning" if "scale" in n.lower() else "blocker", code="sheet_note", message=n, sheet=sid, page=r.page))
         if not r.sheet_id:
             issues.append(Issue(severity="info", code="no_sheet_number", message=f"Page {r.page + 1}: no sheet number found in the title block.", page=r.page))
 
+    if ocr_scales:
+        issues.append(Issue(severity="info", code="scale_by_ocr", sheet=ocr_scales[0][0], page=ocr_scales[0][2],
+                            message="Scales drawn as line strokes, not text, were read from the drawing: "
+                                    + ", ".join(f"{sid} 1\" = {ft:g}'" for sid, ft, _ in ocr_scales) + ". Check them in Plans → Sheets & calibration."))
     sid_of = {sheet_key(s.document_id, s.page): s.id for s in sheets}
+    sheet_of = {sheet_key(s.document_id, s.page): s for s in sheets}
+
+    # 1b. roadway centerlines, stationing and edges (sheet feet) -------------
+    road: dict[str, dict] = {}
+    no_cl: list[tuple] = []
+    for key, r in rep_by_key.items():
+        if not r.linework:
+            continue
+        sid, cal = sid_of[key], cals[key]
+        stations = [(c.x, c.y, c.values["station"], i) for i, c in enumerate(r.candidates) if c.kind == "station"]
+        labels = [dict(x=c.x, y=c.y, kind=c.label, size=c.values.get("size", 6.0), text=c.text, bbox=c.bbox)
+                  for c in r.candidates if c.kind == "road_label"]
+        res = read_roadway_sheet(r.linework, stations, labels, cal.ft_per_pt, max(12.0, min(r.width_pt, r.height_pt) * 0.02))
+        if not res:
+            if len(stations) >= 2 and r.category in ROAD_CATEGORIES:
+                no_cl.append((sid, r.page))
+            continue
+        measured_in = res["measured_ft_per_pt"] * 72
+        if cal.ft_per_pt is None:
+            cal.ft_per_pt, cal.method = res["measured_ft_per_pt"], "stationing"
+            sheet_of[key].scale_ft_per_in = round(measured_in, 2)
+            issues[:] = [i for i in issues if not (i.code == "sheet_note" and i.page == r.page and i.sheet == sid and "scale" in i.message.lower())]
+            issues.append(Issue(severity="info", code="scale_from_stationing", sheet=sid, page=r.page,
+                                message=f"{sid} states no scale; using 1\" = {measured_in:.1f}' measured from its stationing. Set the scale in Plans if that's wrong."))
+        elif abs(res["measured_ft_per_pt"] / cal.ft_per_pt - 1) > 0.02:
+            issues.append(Issue(severity="warning", code="scale_vs_stationing", sheet=sid, page=r.page,
+                                message=f"Stationing on {sid} measures 1\" = {measured_in:.1f}', but the sheet says 1\" = {cal.ft_per_pt * 72:.0f}'. "
+                                        "A half-size print or a wrong scale note? Set the scale in Plans."))
+        res["matchlines"] = [(c.values["station"], c.values.get("sheet_ref"), sid) for c in r.candidates if c.kind == "matchline"]
+        road[key] = res
+
+    if no_cl:
+        issues.append(Issue(severity="info", code="no_centerline", sheet=no_cl[0][0], page=no_cl[0][1],
+                            message=f"{', '.join(x for x, _ in no_cl)} {'have' if len(no_cl) > 1 else 'has'} station labels, but no centerline with road edges on both sides was found along them."))
 
     # 2. structure positions on each calibrated plan sheet (sheet-local feet) ----
     local: dict[str, dict[str, tuple]] = {}
@@ -107,42 +154,133 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         if pos:
             local[key] = pos
 
-    # 3. register sheets into one frame through shared structures -----------
-    registered: dict[str, Similarity] = {}
-    if local:
-        primary = max(local, key=lambda k: len(local[k]))
-        ctrl = overrides.get(primary, {}).get("control_points")
+    # 3. register sheets into one frame: shared structures, matchline stationing, or the same view ----
+    placeable = [k for k, r in rep_by_key.items() if r.category in PLAN_CATEGORIES and cals[k].ft_per_pt and (r.candidates or k in road or r.control)]
+    furniture = _furniture_marks([rep_by_key[k] for k in placeable])
+    ctrl_of = {k: overrides.get(k, {}).get("control_points") for k in placeable}
+    # printed N/E callouts: control points read off the sheet, used where a person hasn't set any
+    auto_of: dict[str, Similarity] = {}
+    for k in placeable:
+        if not ctrl_of.get(k) and rep_by_key[k].control:
+            fit = _fit_printed_control(rep_by_key[k].control, cals[k].ft_per_pt, e0, n0)
+            if fit:
+                auto_of[k] = fit[0]
+                issues.append(Issue(severity="info" if not fit[2] else "warning", code="printed_control", sheet=sid_of[k], page=rep_by_key[k].page,
+                                    message=f"{sid_of[k]}: {fit[1]} printed coordinates fit the sheet to {fit[0].rms:.1f} ft RMS"
+                                            + (f"; {fit[2]} more didn't fit and were left out (a leader followed to the wrong spot?)" if fit[2] else "") + "."))
+
+    def own_frame(k: str) -> Similarity | None:
+        ctrl = ctrl_of.get(k)
         if ctrl and len(ctrl) >= 2:
-            k = cals[primary].ft_per_pt
-            registered[primary] = fit_similarity(np.array([[c[0] * k, c[1] * k] for c in ctrl]), np.array([[c[2], c[3]] for c in ctrl]))
-        else:
-            registered[primary] = Similarity()
+            f = cals[k].ft_per_pt
+            return fit_similarity(np.array([[c[0] * f, c[1] * f] for c in ctrl]), np.array([[c[2] - e0, c[3] + n0] for c in ctrl]))
+        return auto_of.get(k)
+
+    def grow(primary: str) -> tuple[dict[str, Similarity], list[Issue]]:
+        reg: dict[str, Similarity] = {}
+        found: list[Issue] = []
+        own = own_frame(primary)
+        reg[primary] = own or Similarity()
+        if own:  # a real-coordinate frame: every sheet with its own coordinates joins it directly
+            for k in placeable:
+                if k != primary and own_frame(k):
+                    reg[k] = own_frame(k)
         changed = True
         while changed:
             changed = False
+            for key in [k for k in road if k not in reg]:
+                for rk in [k for k in road if k in reg]:
+                    link = link_by_stationing(road[key], road[rk], reg[rk], road[key]["matchlines"] + road[rk]["matchlines"], sid_of[key], sid_of[rk])
+                    if link:
+                        reg[key] = link[0]
+                        changed = True
+                        found.append(Issue(severity="info", code="placed_by_stationing", sheet=sid_of[key], page=rep_by_key[key].page,
+                                           message=f"{sid_of[key]} placed next to {sid_of[rk]} by matching their centerline stationing at the matchline, STA {station_label(link[1], 2)}. "
+                                                   "That fixes position well but direction less so; control points or two shared structures place it more precisely."))
+                        break
             for key, pos in local.items():
-                if key in registered:
+                if key in reg:
                     continue
                 ref_pts = {}
-                for rk in registered:
-                    for sid, p in local[rk].items():
-                        x, z = registered[rk].apply(p[0], p[1])
+                for rk in reg:
+                    for sid, p in local.get(rk, {}).items():
+                        x, z = reg[rk].apply(p[0], p[1])
                         ref_pts.setdefault(sid, (float(x), float(z)))
                 common = [s for s in pos if s in ref_pts]
                 if len(common) >= 2:
                     sim = fit_similarity(np.array([[pos[s][0], pos[s][1]] for s in common]), np.array([ref_pts[s] for s in common]))
-                    registered[key] = sim
+                    reg[key] = sim
                     changed = True
                     if abs(sim.scale - 1) > 0.02:
-                        issues.append(Issue(severity="warning", code="scale_mismatch", sheet=sid_of[key], page=rep_by_key[key].page,
-                                            message=f"{sid_of[key]} disagrees with {sid_of[primary]} by {abs(sim.scale - 1) * 100:.1f}% in scale. Check the stated scale on both sheets."))
+                        found.append(Issue(severity="warning", code="scale_mismatch", sheet=sid_of[key], page=rep_by_key[key].page,
+                                           message=f"{sid_of[key]} disagrees with {sid_of[primary]} by {abs(sim.scale - 1) * 100:.1f}% in scale. Check the stated scale on both sheets."))
                     if sim.rms > 2.0:
-                        issues.append(Issue(severity="warning", code="registration_residual", sheet=sid_of[key], page=rep_by_key[key].page,
-                                            message=f"Shared structures on {sid_of[key]} line up with {sid_of[primary]} only to {sim.rms:.1f} ft RMS."))
-        for key in local:
-            if key not in registered:
-                issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[key], page=rep_by_key[key].page,
-                                    message=f"{sid_of[key]} shares fewer than two labelled structures with the other plan sheets, so its geometry is not placed. Add control points to register it."))
+                        found.append(Issue(severity="warning", code="registration_residual", sheet=sid_of[key], page=rep_by_key[key].page,
+                                           message=f"Shared structures on {sid_of[key]} line up with {sid_of[primary]} only to {sim.rms:.1f} ft RMS."))
+            # points a person matched between two sheets: whichever is placed places the other
+            for key, ov in overrides.items():
+                m = ov.get("match") or {}
+                rk = m.get("ref")
+                if key not in rep_by_key or rk not in rep_by_key or len(m.get("pairs", [])) < 2 or (key in reg) == (rk in reg):
+                    continue
+                pairs = np.array(m["pairs"], float)
+                if key in reg:  # the reference is the one to place
+                    new, old, pn, po = rk, key, pairs[:, 2:4], pairs[:, 0:2]
+                else:
+                    new, old, pn, po = key, rk, pairs[:, 0:2], pairs[:, 2:4]
+                if new not in placeable:
+                    continue
+                kn, ko = cals[new].ft_per_pt, cals[old].ft_per_pt
+                sim = fit_similarity(pn * kn, np.column_stack(reg[old].apply(po[:, 0] * ko, po[:, 1] * ko)))
+                if abs(sim.scale / reg[old].scale - 1) > 0.05:  # not the same spots: leave the sheet unplaced
+                    found.append(Issue(severity="warning", code="match_scale", sheet=sid_of[new], page=rep_by_key[new].page,
+                                       message=f"The points matched between {sid_of[key]} and {sid_of[rk]} imply scales {abs(sim.scale - 1) * 100:.0f}% apart, "
+                                               "so the sheet isn't placed from them. Match them again, or check the sheets' scales."))
+                    continue
+                reg[new] = sim
+                changed = True
+                found.append(Issue(severity="info", code="placed_by_match", sheet=sid_of[new], page=rep_by_key[new].page,
+                                   message=f"{sid_of[new]} placed from {len(pairs)} points you matched with {sid_of[old]}"
+                                           + (f" (they agree to {sim.rms:.1f} ft)." if len(pairs) > 2 else ".")))
+            for key in [k for k in placeable if k not in reg]:
+                for rk in [k for k in placeable if k in reg]:
+                    if _same_view(rep_by_key[key], rep_by_key[rk], cals[key].ft_per_pt, cals[rk].ft_per_pt, furniture):
+                        reg[key] = reg[rk]  # same scale, same view: one sheet frame
+                        changed = True
+                        found.append(Issue(severity="info", code="placed_by_marks", sheet=sid_of[key], page=rep_by_key[key].page,
+                                           message=f"{sid_of[key]} placed with {sid_of[rk]}: both are drawn at the same scale in the same view, with reference marks at the same spots."))
+                        break
+        return reg, found
+
+    # every group of sheets that link to each other; the model is built on the most useful group
+    groups, left = [], list(placeable)
+    while left:
+        primary = max(left, key=lambda k: (bool(ctrl_of.get(k)), k in auto_of, len(local.get(k, {})), road[k]["s_range"][1] - road[k]["s_range"][0] if k in road else 0,
+                                           len(rep_by_key[k].candidates)))
+        reg, found = grow(primary)
+        groups.append((reg, found))
+        left = [k for k in left if k not in reg]
+    registered: dict[str, Similarity] = {}
+    if groups:
+        registered, found = max(groups, key=lambda g: _group_value(g[0], rep_by_key, local, ctrl_of, auto_of))
+        issues.extend(found)
+        model = ", ".join(sid_of[k] for k in rep_by_key if k in registered)
+        singles = []
+        for reg, _ in groups:
+            if reg is registered:
+                continue
+            keys = [k for k in rep_by_key if k in reg]
+            if len(keys) == 1:
+                singles += keys
+                continue
+            issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[keys[0]], page=rep_by_key[keys[0]].page,
+                                message=f"{', '.join(sid_of[k] for k in keys)} line up with each other but are not tied to the model's sheets ({model}): "
+                                        "no shared structures, matchline or reference marks. Add control points to place them."))
+        if singles:
+            singles.sort(key=list(rep_by_key).index)
+            issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[singles[0]], page=rep_by_key[singles[0]].page,
+                                message=f"{', '.join(sid_of[k] for k in singles)} {'are' if len(singles) > 1 else 'is'} not tied to the model's sheets ({model}) "
+                                        f"or to each other: no shared structures, matchline or reference marks. Add control points to place {'them' if len(singles) > 1 else 'it'}."))
     for key, sim in registered.items():
         cals[key].to_project = sim
         for s in sheets:
@@ -170,12 +308,13 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
 
     structures: list[Structure] = []
     invs_by_id: dict[str, list] = {}
+    unplaced: list[tuple[str, list]] = []
     for sid, e in sorted(by_id.items()):
         prefix = sid.split("-")[0]
         cat = next((c for c in e["cats"] if c in PLAN_CATEGORIES), next(iter(e["cats"])))
         system = _system_for(prefix, cat)
         if not e["pos"]:
-            issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(sorted(e['sheets']))} but not on a scaled, registered plan sheet, so it has no location."))
+            unplaced.append((sid, sorted(e["sheets"])))
             continue
         xs = np.array([p["x"] for p in e["pos"]])
         zs = np.array([p["z"] for p in e["pos"]])
@@ -186,10 +325,20 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             issues.append(Issue(severity="warning", code="position_disagreement", object_id=sid, message=f"{sid} is placed {spread:.1f} ft apart on different sheets."))
         position = Fact[list](value=[float(xs.mean()), float(zs.mean())], status=Status.verified if len(e["pos"]) >= 2 and spread < 1 and pos_conf >= 0.8 else Status.ai,
                               confidence=round(pos_conf, 2), source=best_pos["sheet"], page=best_pos["page"], bbox=best_pos["bbox"], text=best_pos["text"], document_id=best_pos["doc"])
-        rim = _merge_values(e["rims"], f"{sid} rim", sid, issues)
+        # headwalls and flared end sections have no rim; only report one if a sheet prints it
+        no_rim = KIND_BY_PREFIX.get(prefix) == "HW" and not e["rims"]
+        rim = _merge_values(e["rims"], f"{sid} rim", sid, [] if no_rim else issues)
         structures.append(Structure(id=sid, system=system, kind=KIND_BY_PREFIX.get(prefix, "OTHER"), x=position.value[0], z=position.value[1],
                                     position=position, rim=rim, type=Fact[str](value=None, status=Status.missing), sheet=best_pos["sheet"]))
         invs_by_id[sid] = e["invs"]
+
+    if len(unplaced) <= 3:
+        for sid, on in unplaced:
+            issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(on)} but not on a scaled, registered plan sheet, so it has no location."))
+    elif unplaced:
+        on = sorted({x for _, x_ in unplaced for x in x_})
+        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(s_ for s_, _ in unplaced)}) appear only on sheets that aren't placed in the model "
+                                                                             f"({', '.join(on)}), so they have no location yet."))
 
     # 5. pipes from plan line work ------------------------------------------
     st_by = {s.id: s for s in structures}
@@ -263,21 +412,36 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
 
     # 6. surfaces --------------------------------------------------------------
     pts = {"existing": [], "proposed": []}
+    derived_on: list[str] = []
     for key, r in rep_by_key.items():
         if key not in registered:
             continue
         cal = cals[key]
-        for c in r.candidates:
+        n_derived = sum(1 for c in _surface_candidates(r) if c.values.get("derived"))
+        if n_derived:
+            derived_on.append(f"{n_derived} on {sid_of[key]}")
+        bad = _contour_outliers(r)
+        for c, near in bad:
+            issues.append(Issue(severity="warning", code="contour_outlier", sheet=sid_of[key], page=r.page,
+                                message=f"Contour labelled “{c.text}” on {sid_of[key]} doesn't fit the contours around it (about {near:.0f}): left out of the surface. "
+                                        "A label clipped at the sheet edge or misread?"))
+        skip = {id(c) for c, _ in bad}
+        for c in _surface_candidates(r):
+            if id(c) in skip:
+                continue
+            which = _surface_role(c)
             if c.kind == "spot":
-                which = "proposed" if c.label in PROPOSED_CODES else "existing" if c.label in EXISTING_CODES else None
                 if which:
                     x, z = cal.pt_to_project(c.x, c.y)
                     pts[which].append((float(x), float(z), c.values["elev"] + elevation_offset))
-            elif c.kind == "contour":
-                which = "existing" if c.values["dashed"] else "proposed"
+            else:
                 arr = np.array(c.values["pts"])
                 x, z = cal.pt_to_project(arr[:, 0], arr[:, 1])
                 pts[which].extend((float(a), float(b), c.values["elev"] + elevation_offset) for a, b in zip(x, z))
+    if derived_on:
+        issues.append(Issue(severity="info", code="contours_counted",
+                            message=f"Unlabelled contours were given elevations by counting from the labelled ones ({', '.join(derived_on)}). "
+                                    "They are checked for consistency but are lower confidence than labelled contours."))
     surfaces = {}
     for which, P in pts.items():
         if len(P) < 12:
@@ -292,7 +456,13 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cell = max(1.0, round(ext / 120))
         nx, nz = int(math.ceil((arr[:, 0].max() - x0) / cell)), int(math.ceil((arr[:, 1].max() - z0) / cell))
         try:
-            g = TIN(arr[:, 0], arr[:, 1], arr[:, 2]).to_grid(x0, z0, cell, nx, nz)
+            tin = TIN(arr[:, 0], arr[:, 1], arr[:, 2], max_edge=MAX_TIN_EDGE_FT)
+            g = tin.to_grid(x0, z0, cell, nx, nz)
+            if tin.dropped_area > 43560 * 0.25:
+                issues.append(Issue(severity="warning", code=f"{which}_surface_gaps",
+                                    message=f"{tin.dropped_area / 43560:.1f} acres between the {which} contours have no labelled elevations, so they are left out of the "
+                                            f"{'existing' if which == 'existing' else 'finished'} surface and the earthwork: gaps between graded areas, or areas drawn only "
+                                            "with contours too far from any label to count. Outside the work limits that changes nothing; inside them, earthwork may be under-counted."))
         except Exception as ex:  # degenerate point sets
             issues.append(Issue(severity="warning", code=f"{which}_surface_failed", message=f"Could not triangulate the {which} surface: {ex}"))
             continue
@@ -300,8 +470,19 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         m.point_count = len(P)
         surfaces[which] = m
 
+    # 7. roadway: one alignment and its edges, from the placed roadway sheets ---
+    pieces = []
+    for key, res in road.items():
+        if key in registered:
+            x, z = registered[key].apply(np.array(res["x"]), np.array(res["z"]))
+            pieces.append(dict(key=key, sheet=sid_of[key], page=rep_by_key[key].page, doc=doc_of[key], res=res,
+                               s=np.array(res["stations"]), x=np.asarray(x, float), z=np.asarray(z, float)))
+    alignment, corridor = _build_road(pieces, issues) if pieces else (None, None)
+    if corridor is not None:
+        corridor.pavement_section = _pavement_section(rep_by_key, sid_of, doc_of, issues)
+
     return dict(sheets=sheets, structures=structures, pipes=pipes, existing=surfaces.get("existing"), proposed=surfaces.get("proposed"),
-                issues=issues, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
+                alignment=alignment, corridor=corridor, issues=issues, real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
                                                      transform=c.to_project.as_dict() if c.to_project else None) for k, c in cals.items()})
 
 
@@ -386,3 +567,221 @@ def _make_pipe(a: Structure, b: Structure, invs_by_id: dict, co, sheet: str, pag
         issues.append(Issue(severity="warning", code="missing_inverts", object_id=pid, message=f"{pid} ({a.id} to {b.id}): matching INV OUT / INV IN not found. Check the profile sheet."))
     return Pipe(id=pid, system=system, from_id=up.id, to_id=dn.id, dia_in=dia_f, material=mat_f, wall_ft=wall_ft(dia, mat),
                 inv_up=inv_up, inv_dn=inv_dn, sheet=sheet)
+
+
+def _same_road(a: dict, b: dict) -> bool:
+    """Two placed centerline pieces are one road if they agree where their stationing overlaps or meets."""
+    lo, hi = max(a["s"][0], b["s"][0]), min(a["s"][-1], b["s"][-1])
+    if hi - lo >= 5:
+        ss = np.linspace(lo, hi, 5)
+    elif lo - hi <= 10:
+        ss = np.array([(lo + hi) / 2])
+    else:
+        return False
+    d = np.hypot(np.interp(ss, a["s"], a["x"]) - np.interp(ss, b["s"], b["x"]), np.interp(ss, a["s"], a["z"]) - np.interp(ss, b["s"], b["z"]))
+    return bool(d.max() <= 3.0 + max(0.0, lo - hi))
+
+
+def _build_road(pieces: list[dict], issues: list[Issue]) -> tuple[Alignment, CorridorTemplate | None]:
+    pieces = sorted(pieces, key=lambda p: -(p["s"][-1] - p["s"][0]))
+    group, rest = [pieces[0]], pieces[1:]
+    changed = True
+    while changed:
+        changed = False
+        for p in list(rest):
+            if any(_same_road(p, g) for g in group):
+                group.append(p)
+                rest.remove(p)
+                changed = True
+    for p in rest:
+        issues.append(Issue(severity="info", code="other_alignment", sheet=p["sheet"], page=p["page"],
+                            message=f"{p['sheet']} has another centerline (STA {station_label(p['s'][0])} to {station_label(p['s'][-1])}). "
+                                    "Only one road per project is modeled so far."))
+    # centerline points: each piece adds only the stations not already covered
+    pts, covered = [], []
+    for p in group:
+        for s_, x_, z_ in zip(p["s"], p["x"], p["z"]):
+            if not any(a - 0.5 <= s_ <= b + 0.5 for a, b in covered):
+                pts.append((float(s_), float(x_), float(z_)))
+        covered.append((float(p["s"][0]), float(p["s"][-1])))
+    pts.sort()
+    sheets = sorted({p["sheet"] for p in group})
+    fits = [p["res"]["fit"] for p in group]
+    conf = 0.9 if all(len(f["inliers"]) >= 3 and f["rms"] < 0.5 for f in fits) else 0.7
+    alignment = Alignment(name=f"Centerline ({', '.join(sheets)})", source=", ".join(sheets), confidence=conf,
+                          points=[AlignmentPoint(s=round(s_, 2), x=round(x_, 3), z=round(z_, 3)) for s_, x_, z_ in pts])
+
+    # edges: the same kind and side from every piece, combined by how much road each covers
+    by = defaultdict(list)
+    for p in group:
+        for e in p["res"]["edges"]:
+            if e["kind"] in EDGE_CODES:
+                by[(e["kind"], e["side"])].append((e, p))
+    edges: list[RoadEdge] = []
+    for (kind, side), lst in sorted(by.items()):
+        offs = [e["offset"] for e, _ in lst]
+        cov = [e["coverage"] for e, _ in lst]
+        off = float(np.average(offs, weights=cov))
+        main_e, main_p = max(lst, key=lambda t: t[0]["coverage"])
+        eid = f"{EDGE_CODES[kind]}-{side}T"
+        if max(offs) - min(offs) > 0.5:
+            issues.append(Issue(severity="warning", code="edge_disagreement", object_id=eid,
+                                message=f"{EDGE_NAMES[kind].capitalize()} {side}T is {', '.join(f'{o:.1f} ft on {p_['sheet']}' for (e_, p_), o in zip(lst, offs))}. "
+                                        "The section may change along the road; only one width is modeled."))
+        by_label = [t for t in lst if t[0]["named_by"] == "label"]
+        lab = max(by_label, key=lambda t: t[0]["coverage"])[0]["label"] if by_label else None
+        conf_e = 0.8 if by_label else 0.55
+        if len({p_["sheet"] for _, p_ in lst}) >= 2 and max(offs) - min(offs) <= 0.2:
+            conf_e += 0.1
+        fact = Fact[float](value=round(off, 2), status=Status.ai, confidence=round(conf_e, 2), source=main_p["sheet"], page=main_p["page"],
+                           document_id=main_p["doc"], bbox=lab["bbox"] if lab else None,
+                           text=f"“{lab['text']}” label on a line {offset_label(-off if side == 'L' else off)}" if lab else f"line {offset_label(-off if side == 'L' else off)} of centerline, named from its order")
+        edges.append(RoadEdge(id=eid, kind=kind, side=side, offset=fact, station_from=round(min(e["s0"] for e, _ in lst), 1),
+                              station_to=round(max(e["s1"] for e, _ in lst), 1), named_by="label" if by_label else "order"))
+    # symmetric sections: both sides read the same raises confidence
+    for e in edges:
+        o = next((x for x in edges if x.kind == e.kind and x.side != e.side), None)
+        if o and abs(o.offset.value - e.offset.value) <= 0.3:
+            e.offset.confidence = round(min(0.95, e.offset.confidence + 0.05), 2)
+    ordered = [e.id for e in edges if e.named_by == "order"]
+    if ordered:
+        issues.append(Issue(severity="info", code="edges_by_order", message=f"No labels on {', '.join(ordered)}: named from their order outward from the centerline. Confirm them in Inspect."))
+    if not edges:
+        issues.append(Issue(severity="warning", code="no_road_edges", message=f"Centerline found on {alignment.source}, but no pavement, curb or sidewalk lines were identified along it."))
+        return alignment, None
+    pav = [e.offset.value for e in edges if e.kind == "pavement"]
+    if len(pav) < 2:
+        issues.append(Issue(severity="warning", code="no_pavement_edges", message=f"Edge of pavement wasn't identified on both sides of the centerline on {alignment.source}, so the road surface isn't drawn."))
+    corridor = CorridorTemplate(pavement_half_width=round(float(np.mean(pav)), 2) if len(pav) == 2 else None, crown_slope_assumed=True,
+                                curb_width=None, walk_inner=None, walk_outer=None, edges=edges,
+                                pavement_section=Fact[str](value=None, status=Status.missing))
+    issues.append(Issue(severity="info", code="crown_assumed", message="The road is drawn with a 2% crown; cross slope isn't read from the plans yet."))
+    return alignment, corridor
+
+
+def _pavement_section(rep_by_key: dict, sid_of: dict, doc_of: dict, issues: list[Issue]) -> Fact:
+    """Pavement layers printed together (a typical section or a note), read top-down. Missing if none are found."""
+    groups = []
+    for key, r in rep_by_key.items():
+        layers = sorted((c for c in r.candidates if c.kind == "pavement_layer"), key=lambda c: (c.y, c.x))
+        for c in layers:
+            g = next((g for g in groups if g["key"] == key and min(abs(c.y - o.y) + abs(c.x - o.x) * 0.25 for o in g["c"]) < 60), None)
+            if g:
+                g["c"].append(c)
+            else:
+                groups.append(dict(key=key, c=[c]))
+    surface = ("ASPHALT", "HMA", "AC", "A.C.", "CONCRETE", "PCC", "P.C.C.")
+    groups = [g for g in groups if len(g["c"]) >= 2 and any(any(w in c.values["material"] for w in surface) for c in g["c"])]
+    if not groups:
+        return Fact[str](value=None, status=Status.missing)
+    rank = {"details": 0, "cross_section": 1, "roadway": 2}
+    groups.sort(key=lambda g: (-len(g["c"]), rank.get(rep_by_key[g["key"]].category, 3)))
+    g = groups[0]
+    if len(groups) > 1:
+        issues.append(Issue(severity="info", code="pavement_sections", message=f"{len(groups)} pavement sections found; using the one on {sid_of[g['key']]}. Others are on "
+                            + ", ".join(sorted({sid_of[o['key']] for o in groups[1:]})) + "."))
+    seen, parts = set(), []
+    for c in g["c"]:
+        t = f"{c.values['thickness_in']:g} in {c.values['material'].lower()}"
+        if t not in seen:
+            seen.add(t)
+            parts.append(t)
+    xs = [v for c in g["c"] for v in c.bbox]
+    r = rep_by_key[g["key"]]
+    return Fact[str](value=" / ".join(parts), status=Status.ai, confidence=0.7, source=sid_of[g["key"]], page=r.page, document_id=doc_of[g["key"]],
+                     bbox=[min(xs[0::4]), min(xs[1::4]), max(xs[2::4]), max(xs[3::4])], text=" | ".join(dict.fromkeys(c.text for c in g["c"])))
+
+
+def _mark_key(m) -> tuple:
+    return (round(m[0]), round(m[1]), round(m[2]))
+
+
+def _furniture_marks(reports: list[SheetReport]) -> set:
+    """Marks at the same page spot on most sheets (north arrows, legend symbols): they say nothing about the view."""
+    n = defaultdict(int)
+    for r in reports:
+        for k in {_mark_key(m) for m in r.marks}:
+            n[k] += 1
+    return {k for k, c in n.items() if c >= max(3, len(reports) / 2)}
+
+
+def _same_view(a: SheetReport, b: SheetReport, ka: float, kb: float, furniture: set) -> bool:
+    """Same scale, and at least two reference marks (e.g. a plan set's "common control points") at the same spots,
+    well apart: the two sheets are the same view of the site."""
+    if abs(ka / kb - 1) > 0.005 or abs(a.width_pt - b.width_pt) > 1 or abs(a.height_pt - b.height_pt) > 1:
+        return False
+    B = [m for m in b.marks if _mark_key(m) not in furniture]
+    hits = [m for m in a.marks if _mark_key(m) not in furniture
+            and any(abs(m[0] - o[0]) <= 0.5 and abs(m[1] - o[1]) <= 0.5 and abs(m[2] - o[2]) <= 0.3 for o in B)]
+    return any(math.hypot(p[0] - q[0], p[1] - q[1]) >= 0.25 * a.width_pt for i, p in enumerate(hits) for q in hits[i + 1:])
+
+
+def _group_value(reg: dict, rep_by_key: dict, local: dict, ctrl_of: dict, auto_of: dict | None = None) -> tuple:
+    """Control points a person set first, then both surfaces (earthwork), then structures, then coordinates
+    printed on the sheets, then everything else read."""
+    n = defaultdict(int)
+    for k in reg:
+        for c in _surface_candidates(rep_by_key[k]):
+            n[_surface_role(c)] += len(c.values["pts"]) if c.kind == "contour" else 1
+    surfaces = sum(1 for r in ("existing", "proposed") if n[r] >= 12)
+    return (any(ctrl_of.get(k) for k in reg), surfaces, sum(len(local.get(k, {})) for k in reg), any(k in (auto_of or {}) for k in reg),
+            sum(len(rep_by_key[k].candidates) for k in reg), len(reg))
+
+
+def _surface_candidates(r: SheetReport):
+    """Spot elevations and contours that describe the ground. Not on roadway (plan & profile) sheets, where
+    "EG 985.32 / FG 984.10" labels and elevation grid lines belong to the profile, not to points on the plan."""
+    if r.category in ROAD_CATEGORIES:
+        return []
+    return [c for c in r.candidates if c.kind in ("spot", "contour")]
+
+
+def _surface_role(c) -> str | None:
+    if c.kind == "contour":
+        return c.values.get("surface") or ("existing" if c.values["dashed"] else "proposed")
+    return "proposed" if c.label in PROPOSED_CODES else "existing" if c.label in EXISTING_CODES else None
+
+
+def _contour_outliers(r: SheetReport) -> list[tuple]:
+    """Labelled contours whose elevation is far from the labelled contours nearest them: (candidate, neighbours' median)."""
+    cs = [c for c in _surface_candidates(r) if c.kind == "contour"]
+    if len(cs) < 6:
+        return []
+    xy = np.array([[c.x, c.y] for c in cs])
+    el = np.array([c.values["elev"] for c in cs])
+    steps = np.diff(np.unique(el))
+    interval = float(np.median(steps)) if len(steps) else 1.0
+    out = []
+    for i, c in enumerate(cs):
+        d = np.hypot(*(xy - xy[i]).T)
+        d[i] = np.inf
+        near = float(np.median(el[np.argsort(d)[:5]]))
+        if abs(el[i] - near) > max(10 * interval, 25.0):
+            out.append((c, near))
+    return out
+
+
+def _fit_printed_control(points: list[dict], ft_per_pt: float, e0: float, n0: float):
+    """Fit a sheet to its printed coordinates at its stated scale, dropping points that don't fit (a leader
+    followed to the wrong spot). Needs three that agree within 2 ft RMS, spread over the sheet.
+    Returns (Similarity, points used, points dropped) or None."""
+    if len(points) < 3 or not ft_per_pt:
+        return None
+    src = np.array([[p["x"] * ft_per_pt, p["y"] * ft_per_pt] for p in points])
+    dst = np.array([[p["e"] - e0, -(p["n"] - n0)] for p in points])
+    keep = np.ones(len(points), bool)
+    while True:
+        sim = fit_similarity(src[keep], dst[keep], allow_scale=False)
+        if sim.rms <= 2.0:
+            break
+        if keep.sum() <= 3:
+            return None
+        px, pz = sim.apply(src[:, 0], src[:, 1])
+        r = np.hypot(px - dst[:, 0], pz - dst[:, 1])
+        r[~keep] = -1
+        keep[int(np.argmax(r))] = False
+    spread = np.ptp(src[keep], axis=0).max()
+    if spread < 100:  # ft: points bunched together pin rotation poorly
+        return None
+    sim.n = int(keep.sum())
+    return sim, int(keep.sum()), int((~keep).sum())

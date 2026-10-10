@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-fitz = pytest.importorskip("fitz")
+fitz = pytest.importorskip("pymupdf")
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "maple-ridge-sample-plans.pdf"
 
 
@@ -15,7 +15,7 @@ def test_pdf_reader_on_sample_set():
     from gv.ingest.pdf import read_plan_set
 
     reps = read_plan_set(SAMPLE.read_bytes())
-    assert [r.sheet_id for r in reps] == ["C-0.0", "C-3.0", "C-4.0", "C-4.1", "C-5.0"]
+    assert [r.sheet_id for r in reps] == ["C-0.0", "C-3.0", "C-4.0", "C-4.1", "C-5.0", "C-6.0", "C-6.1"]
     storm = reps[2]
     assert storm.category == "storm" and storm.scale_ft_per_in == 40
     ids = {c.label for c in storm.candidates if c.kind == "structure"}
@@ -54,6 +54,9 @@ def test_upload_and_interpret(client):
     data = client.get(f"/api/projects/{pid}").json()
     assert len(data["project"]["structures"]) == 11
     assert data["analysis"]["earthwork"]["available"]
+    # headwalls have no rim: not an issue, not a review item
+    assert not any(i["object_id"] == "HW-1" and i["code"] == "missing_value" for i in data["project"]["issues"])
+    assert not any(r["object_id"] == "HW-1" and r["field"] == "rim" for r in data["analysis"]["review"])
     cb4 = next(s for s in data["project"]["structures"] if s["id"] == "CB-4")
     assert cb4["rim"]["value"] == 1045.76 and cb4["rim"]["source"]
     png = client.get(f"/api/documents/{did}/pages/2.png", params={"bbox": ",".join(map(str, cb4["rim"]["bbox"]))})
@@ -69,3 +72,17 @@ def test_rejects_non_pdf(client):
     pid = client.post("/api/projects", json={"name": "x"}).json()["project"]["id"]
     r = client.post(f"/api/projects/{pid}/documents", files={"file": ("a.dwg", b"AC1032", "application/octet-stream")})
     assert r.status_code == 415
+
+
+def test_password(client, monkeypatch):
+    import base64
+    import sys
+    api = sys.modules["gv.api"]
+    monkeypatch.setattr(api, "PASSWORD", "s3cret plans")
+    assert client.get("/api/health").status_code == 200  # for the host's monitoring
+    r = client.get("/api/projects")
+    assert r.status_code == 401 and r.headers["www-authenticate"].startswith("Basic")
+    assert client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"me:wrong").decode()}).status_code == 401
+    ok = {"Authorization": "Basic " + base64.b64encode("anyone:s3cret plans".encode()).decode()}
+    assert client.get("/api/projects", headers=ok).status_code == 200
+    assert client.get("/api/projects", headers={"Authorization": "Basic !!notbase64"}).status_code == 401

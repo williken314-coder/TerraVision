@@ -24,13 +24,17 @@ def station_fn(al: Alignment | None):
     return f
 
 
-FIELDS = {"structure": ["rim"], "pipe": ["dia_in", "material", "inv_up", "inv_dn"], "line": ["dia_in", "material", "cover"]}
+FIELDS = {"structure": ["rim"], "pipe": ["dia_in", "material", "inv_up", "inv_dn"], "line": ["dia_in", "material", "cover"],
+          "edge": ["offset"], "section": ["pavement_section"]}
 
 
 def _objects(prj: Project):
     yield from (("structure", s) for s in prj.structures)
     yield from (("pipe", p) for p in prj.pipes)
     yield from (("line", l) for l in prj.lines)
+    if prj.corridor and prj.corridor.edges:  # read from uploaded plans (the demo's typical section is fixed)
+        yield from (("edge", e) for e in prj.corridor.edges)
+        yield ("section", prj.corridor)
 
 
 def review_items(prj: Project) -> list[dict]:
@@ -38,6 +42,8 @@ def review_items(prj: Project) -> list[dict]:
     for kind, obj in _objects(prj):
         for f in FIELDS[kind]:
             fact = getattr(obj, f)
+            if kind == "structure" and obj.kind == "HW" and f == "rim" and fact.value is None:
+                continue  # headwalls have no rim
             if isinstance(fact, Fact) and fact.needs_review():
                 out.append(dict(object_id=obj.id, field=f, status=fact.status.value, confidence=fact.confidence, value=fact.value,
                                 source=fact.source or getattr(obj, "sheet", None), page=fact.page, bbox=fact.bbox, text=fact.text,

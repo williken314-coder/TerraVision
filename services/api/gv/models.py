@@ -55,24 +55,58 @@ class AlignmentPoint(BaseModel):
     s: float  # station, ft
     x: float
     z: float
-    elev: float  # finished-grade profile at centerline
+    elev: Optional[float] = None  # finished-grade profile at centerline; None until a profile or surface gives it
 
 
 class Alignment(BaseModel):
     name: str
     points: list[AlignmentPoint]
+    source: Optional[str] = None  # sheet(s) the centerline and stationing were read from
+    confidence: Optional[float] = None
+    profile_source: Optional[str] = None  # where the elevations come from
+
+
+EdgeKind = Literal["pavement", "curb_face", "curb_back", "walk_inner", "walk_outer", "row"]
+
+
+EDGE_CODES = {"pavement": "EP", "curb_face": "FC", "curb_back": "BC", "walk_inner": "SW-IN", "walk_outer": "SW-OUT", "row": "RW"}
+EDGE_NAMES = {"pavement": "edge of pavement", "curb_face": "face of curb", "curb_back": "back of curb", "walk_inner": "sidewalk, inner edge",
+              "walk_outer": "sidewalk, outer edge", "row": "right-of-way"}
+
+
+class RoadEdge(BaseModel):
+    """A line running at a constant offset from the centerline, read from a roadway plan."""
+
+    id: str  # e.g. "EP-LT", "BC-RT"
+    kind: EdgeKind
+    side: Literal["L", "R"]
+    offset: Fact[float]  # ft from centerline, always positive
+    station_from: float
+    station_to: float
+    named_by: Literal["label", "order"]  # a label on the plan, or its order outward from the centerline
 
 
 class CorridorTemplate(BaseModel):
-    """Typical section, offsets in feet from centerline."""
+    """Typical section, offsets in feet from centerline.
 
-    pavement_half_width: float = 14.0
+    The symmetric fields describe the demo project. Corridors read from uploaded plans carry ``edges``
+    (per side, with sources) and leave anything the plans don't show as None.
+    """
+
+    pavement_half_width: Optional[float] = 14.0
     crown_slope: float = 0.02
-    curb_width: float = 1.0
+    crown_slope_assumed: bool = False  # not read from the plans; used only to draw the road
+    curb_width: Optional[float] = 1.0
     curb_height: float = 0.5
-    walk_inner: float = 18.0
-    walk_outer: float = 23.0
+    walk_inner: Optional[float] = 18.0
+    walk_outer: Optional[float] = 23.0
     pavement_section: Fact[str] = Field(default_factory=lambda: Fact[str](value="1.5 in HMA surface / 2.5 in HMA base / 8 in aggregate base", source="C-8.0"))
+    edges: list[RoadEdge] = []
+    id: str = "SECTION"  # object id for confirming / correcting the pavement section
+
+    def edge(self, kind: str, side: str) -> Optional[float]:
+        e = next((e for e in self.edges if e.kind == kind and e.side == side), None)
+        return e.offset.value if e else None
 
 
 class GridSurface(BaseModel):
@@ -186,6 +220,9 @@ class Datum(BaseModel):
     epsg: Optional[int] = None  # e.g. 2227 for CA State Plane Zone III, US ft
     elevation_offset_ft: float = 0.0  # added to every plan elevation (datum conversion)
     units: Literal["ft", "m"] = "ft"
+    # [E, N] subtracted from real-world coordinates (control points, LandXML) so project
+    # coordinates stay small: x = E - E0, z = -(N - N0). Set once, the first time real coordinates arrive.
+    false_origin: Optional[list[float]] = None
 
 
 class Document(BaseModel):
@@ -196,6 +233,20 @@ class Document(BaseModel):
     error: Optional[str] = None
     uploaded_at: str
     vision_used: bool = False
+
+
+class ImportedSurface(BaseModel):
+    """A TIN surface from an imported LandXML file, and the role it plays in the model."""
+
+    document_id: str
+    index: int  # position among the file's surfaces
+    name: str
+    desc: str = ""
+    points: int
+    faces: int
+    role: Optional[Literal["existing", "proposed", "ignore"]] = None
+    role_source: Optional[Literal["name", "user"]] = None  # guessed from the surface name, or set by a person
+    used: bool = False  # this surface is the project's existing / finished surface
 
 
 class Project(BaseModel):
@@ -210,6 +261,7 @@ class Project(BaseModel):
     corridor: Optional[CorridorTemplate] = None
     existing: Optional[GridSurface] = None
     proposed: Optional[GridSurface] = None
+    imported_surfaces: list[ImportedSurface] = []
     structures: list[Structure] = []
     pipes: list[Pipe] = []
     lines: list[LinearUtility] = []
@@ -229,5 +281,8 @@ class Project(BaseModel):
     def line(self, lid: str) -> Optional[LinearUtility]:
         return next((l for l in self.lines if l.id == lid), None)
 
+    def road_edge(self, eid: str) -> Optional[RoadEdge]:
+        return next((e for e in self.corridor.edges if e.id == eid), None) if self.corridor else None
+
     def find(self, oid: str):
-        return self.structure(oid) or self.pipe(oid) or self.line(oid)
+        return self.structure(oid) or self.pipe(oid) or self.line(oid) or self.road_edge(oid)
