@@ -420,7 +420,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                 issues.append(Issue(severity="warning", code=f"{which}_surface_gaps",
                                     message=f"{tin.dropped_area / 43560:.1f} acres between the {which} contours have no labelled elevations, so they are left out of the "
                                             f"{'existing' if which == 'existing' else 'finished'} surface and the earthwork: gaps between graded areas, or areas drawn only "
-                                            "with unlabelled contours (a stockpile or pad top, say). Earthwork may be under-counted there."))
+                                            "with contours too far from any label to count. Outside the work limits that changes nothing; inside them, earthwork may be under-counted."))
         except Exception as ex:  # degenerate point sets
             issues.append(Issue(severity="warning", code=f"{which}_surface_failed", message=f"Could not triangulate the {which} surface: {ex}"))
             continue
