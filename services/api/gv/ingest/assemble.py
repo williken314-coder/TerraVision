@@ -370,10 +370,14 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
 
     # 6. surfaces --------------------------------------------------------------
     pts = {"existing": [], "proposed": []}
+    derived_on: list[str] = []
     for key, r in rep_by_key.items():
         if key not in registered:
             continue
         cal = cals[key]
+        n_derived = sum(1 for c in _surface_candidates(r) if c.values.get("derived"))
+        if n_derived:
+            derived_on.append(f"{n_derived} on {sid_of[key]}")
         bad = _contour_outliers(r)
         for c, near in bad:
             issues.append(Issue(severity="warning", code="contour_outlier", sheet=sid_of[key], page=r.page,
@@ -392,6 +396,10 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                 arr = np.array(c.values["pts"])
                 x, z = cal.pt_to_project(arr[:, 0], arr[:, 1])
                 pts[which].extend((float(a), float(b), c.values["elev"] + elevation_offset) for a, b in zip(x, z))
+    if derived_on:
+        issues.append(Issue(severity="info", code="contours_counted",
+                            message=f"Unlabelled contours were given elevations by counting from the labelled ones ({', '.join(derived_on)}). "
+                                    "They are checked for consistency but are lower confidence than labelled contours."))
     surfaces = {}
     for which, P in pts.items():
         if len(P) < 12:

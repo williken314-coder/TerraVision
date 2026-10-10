@@ -21,7 +21,9 @@ import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
-from . import ocr
+import numpy as np
+
+from . import contours, ocr
 from .roadway import chain_segments, edge_label_kind
 
 try:
@@ -451,20 +453,47 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category, title: s
     surface_role = "existing" if category == "existing" else "proposed" if FINISHED_TITLE.search(title) and not re.search(r"EXIST", title, re.I) else None
     if category in ("grading", "existing", "site"):
         long_polys = [p for p in polys if p.length > size_ref * 3 and len(p.pts) >= 3]
+        labels: dict[int, set] = defaultdict(set)
         for s in spans:
             m = CONTOUR_LABEL.match(s.text)
             if not m or not long_polys:
                 continue
             best, bd = None, float("inf")
-            for p in long_polys:
+            for i, p in enumerate(long_polys):
                 d = _dist_point_poly(s.x, s.y, p.pts)
                 if d < bd:
-                    best, bd = p, d
-            if best and bd < s.size * 1.2:
+                    best, bd = i, d
+            if best is not None and bd < s.size * 1.2:
+                p = long_polys[best]
+                labels[best].add(float(m.group(1)))
                 out.append(Candidate("contour", m.group(1), {
-                    "elev": float(m.group(1)), "dashed": best.dashed, "surface": surface_role,
-                    "pts": [[round(x, 2), round(y, 2)] for x, y in best.pts]}, page, s.x, s.y, bb(s), s.text,
-                    0.8 if best.dashed or category == "grading" else 0.7))
+                    "elev": float(m.group(1)), "dashed": p.dashed, "surface": surface_role,
+                    "pts": [[round(x, 2), round(y, 2)] for x, y in p.pts]}, page, s.x, s.y, bb(s), s.text,
+                    0.8 if p.dashed or category == "grading" else 0.7))
+        out += _unlabelled_contours(long_polys, labels, page, size_ref, surface_role)
+    return out
+
+
+def _unlabelled_contours(long_polys, labels: dict[int, set], page: int, size_ref: float, surface_role) -> list[Candidate]:
+    """Elevations for the contours between the labelled ones, counted from them (gv.ingest.contours).
+
+    Each line style (existing dashed, proposed solid ...) is counted on its own, only against lines of that style.
+    """
+    out = []
+    families = defaultdict(list)
+    for i, p in enumerate(long_polys):
+        families[(p.dashed, round(p.width, 2))].append(i)
+    for fam in families.values():
+        lab = {k: next(iter(labels[i])) for k, i in enumerate(fam) if len(labels.get(i, ())) == 1}
+        if len(lab) < 2:
+            continue
+        got = contours.derive_elevations([np.asarray(long_polys[i].pts, float) for i in fam], lab, reach=size_ref * 2.5)
+        for k, (elev, votes) in got.items():
+            p = long_polys[fam[k]]
+            x, y = p.pts[len(p.pts) // 2]
+            out.append(Candidate("contour", f"{elev:g}", {"elev": elev, "dashed": p.dashed, "surface": surface_role, "derived": True,
+                                                          "pts": [[round(a, 2), round(b, 2)] for a, b in p.pts]},
+                                 page, x, y, [], f"unlabelled contour, counted from the labelled ones ({votes} transects agree)", 0.6))
     return out
 
 
