@@ -5,6 +5,8 @@ Then open http://localhost:8000 for the app.
 """
 from __future__ import annotations
 
+import base64
+import hmac
 import math
 import os
 import re
@@ -13,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +29,7 @@ from .demo import build_demo
 from .edits import EditError, FieldEdit, apply_edit
 from .geometry.surface import Grid
 from .geometry.utilities import NotEnoughData, trench_quantities
-from .ingest import landxml, raster, vision
+from .ingest import landxml, ocr, raster, vision
 from .ingest.pdf import page_count, render_page_png
 from .models import Datum, Project
 from .processing import is_landxml_doc, process_document, rebuild_project
@@ -56,6 +58,24 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="TerraVision API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("GV_CORS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+PASSWORD = os.environ.get("GV_PASSWORD") or None  # set it whenever the app is reachable by anyone but you
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    """With GV_PASSWORD set, everything but the health check asks for it (browser sign-in box, any user name)."""
+    if PASSWORD and request.url.path != "/api/health":
+        ok = False
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                _, _, given = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+                ok = hmac.compare_digest(given.encode(), PASSWORD.encode())
+            except (ValueError, UnicodeDecodeError):
+                ok = False
+        if not ok:
+            return Response("Sign in to TerraVision", status_code=401, headers={"WWW-Authenticate": 'Basic realm="TerraVision", charset="UTF-8"'})
+    return await call_next(request)
 
 
 def get_db():
@@ -78,7 +98,7 @@ def _payload(prj: Project) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "vision_available": vision.vision_available(), "opencv_available": raster.OPENCV,
+    return {"ok": True, "vision_available": vision.vision_available(), "opencv_available": raster.OPENCV, "ocr_available": ocr.OCR,
             "database": dbm.DATABASE_URL.split("://")[0], "max_upload_mb": MAX_UPLOAD_MB}
 
 

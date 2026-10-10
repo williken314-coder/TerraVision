@@ -72,3 +72,17 @@ def test_rejects_non_pdf(client):
     pid = client.post("/api/projects", json={"name": "x"}).json()["project"]["id"]
     r = client.post(f"/api/projects/{pid}/documents", files={"file": ("a.dwg", b"AC1032", "application/octet-stream")})
     assert r.status_code == 415
+
+
+def test_password(client, monkeypatch):
+    import base64
+    import sys
+    api = sys.modules["gv.api"]
+    monkeypatch.setattr(api, "PASSWORD", "s3cret plans")
+    assert client.get("/api/health").status_code == 200  # for the host's monitoring
+    r = client.get("/api/projects")
+    assert r.status_code == 401 and r.headers["www-authenticate"].startswith("Basic")
+    assert client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"me:wrong").decode()}).status_code == 401
+    ok = {"Authorization": "Basic " + base64.b64encode("anyone:s3cret plans".encode()).decode()}
+    assert client.get("/api/projects", headers=ok).status_code == 200
+    assert client.get("/api/projects", headers={"Authorization": "Basic !!notbase64"}).status_code == 401

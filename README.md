@@ -37,6 +37,17 @@ Open http://localhost:8000. The **Maple Ridge (demo)** project loads first. To t
 docker compose up --build        # then open http://localhost:8000
 ```
 
+### Putting it online
+
+Anything reachable by others needs a password: set `GV_PASSWORD` and every page and API call asks for it (the browser's sign-in box; any user name), except `/api/health` for the host's monitoring.
+
+```bash
+docker build -f services/api/Dockerfile -t terravision .
+docker run -p 8000:8000 -e GV_PASSWORD='choose-one' -v terravision-data:/data terravision
+```
+
+Uploads and the database live in `/data`: give it a persistent volume or they're lost on redeploy. One container is enough (SQLite); set `DATABASE_URL` for PostgreSQL/PostGIS (`docker compose up --build` runs both). A 36-sheet set takes about 4 minutes to read, mostly OCR of stroke-drawn scales; it runs in the background after upload. Uploads are limited to `GV_MAX_UPLOAD_MB` (200 by default) and need about 1 GB of memory while a large set is read.
+
 ### Optional AI features
 
 Set `ANTHROPIC_API_KEY` on the server to turn on:
