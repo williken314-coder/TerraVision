@@ -460,6 +460,8 @@ function buildSite(){while(SITE.children.length){const c=SITE.children.pop();dis
   [EG,FG].forEach(G=>{if(G){add(G.x0,G.z0);add(G.x0+G.nx*G.cell,G.z0+G.nz*G.cell);}});PRJ.structures.forEach(s=>add(s.x,s.z));
   if(box.isEmpty()){add(-100,-100);add(100,100);}
   const c=box.getCenter(V3()),sz=box.getSize(V3());O.center=V3(c.x,wy(grid?(grid.sample(c.x,c.z)||BASE+6):(rims.length?rims[0]:BASE)),c.z);if(!isFinite(O.center.y))O.center.y=6;O.radius=Math.max(80,Math.hypot(sz.x,sz.z)/2);
+  // fog, zoom-out limit and far plane follow the site's size (a 1,500 ft earthwork site, not just the 600 ft demo)
+  scene.fog.near=Math.max(900,O.radius*2.5);scene.fog.far=Math.max(2400,O.radius*7);controls.maxDistance=Math.max(3000,O.radius*6);camera.far=Math.max(8000,O.radius*14);camera.updateProjectionMatrix();
   Object.assign(sun.shadow.camera,{left:-O.radius,right:O.radius,top:O.radius,bottom:-O.radius,near:50,far:O.radius*4});sun.position.set(c.x-O.radius*.6,O.radius*1.2,c.z+O.radius*.5);sun.target.position.set(c.x,0,c.z);sun.shadow.camera.updateProjectionMatrix();
   // surfaces
   if(EG){O.existMesh=new T.Mesh(surfGeo(EG),mExist);O.existMesh.userData={kind:'ground'};O.existMesh.receiveShadow=true;O.existC=contourObj(EG,true);SITE.add(O.existMesh,O.existC);}
