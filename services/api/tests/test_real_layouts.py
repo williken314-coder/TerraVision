@@ -163,3 +163,15 @@ def test_matched_points_join_the_earthwork_to_real_coordinates():
     # G03 (same view as G04) lands where AC01's coordinates say: project x = E - E0, z = -(N - N0)
     g = res["existing"]
     assert g.x0 == pytest.approx(300 * k_g + 200, abs=15) and g.z0 == pytest.approx(300 * k_g + 100, abs=15)
+
+
+def test_matched_points_that_disagree_on_scale_are_not_used():
+    eg = sheet(0, "G03", "EXISTING GRADE CONTOURS", "existing", TARGETS, ramp(900, "existing", 300, 300))
+    fg = sheet(1, "G04", "FINISHED GRADE CONTOURS", "grading", TARGETS, ramp(905, "proposed", 320, 300))
+    other = sheet(2, "C19", "RESERVOIR GRADING PLAN", "grading", [], ramp(905, "proposed", 320, 300))
+    other.scale_ft_per_in = 20
+    # these "same spots" are 600 pt apart on both sheets: 167 ft at 1" = 20' but 417 ft at 1" = 50'
+    pairs = [[300, 300, 300, 300], [900, 300, 900, 300]]
+    res = assemble([("d", r) for r in (eg, fg, other)], {"d:2": {"match": {"ref": "d:1", "pairs": pairs}}})
+    assert "C19" not in {s.id for s in res["sheets"] if s.registered}
+    assert any(i.code == "match_scale" and "isn't placed" in i.message for i in res["issues"])

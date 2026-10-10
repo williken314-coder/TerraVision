@@ -232,15 +232,16 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                     continue
                 kn, ko = cals[new].ft_per_pt, cals[old].ft_per_pt
                 sim = fit_similarity(pn * kn, np.column_stack(reg[old].apply(po[:, 0] * ko, po[:, 1] * ko)))
+                if abs(sim.scale / reg[old].scale - 1) > 0.05:  # not the same spots: leave the sheet unplaced
+                    found.append(Issue(severity="warning", code="match_scale", sheet=sid_of[new], page=rep_by_key[new].page,
+                                       message=f"The points matched between {sid_of[key]} and {sid_of[rk]} imply scales {abs(sim.scale - 1) * 100:.0f}% apart, "
+                                               "so the sheet isn't placed from them. Match them again, or check the sheets' scales."))
+                    continue
                 reg[new] = sim
                 changed = True
                 found.append(Issue(severity="info", code="placed_by_match", sheet=sid_of[new], page=rep_by_key[new].page,
                                    message=f"{sid_of[new]} placed from {len(pairs)} points you matched with {sid_of[old]}"
                                            + (f" (they agree to {sim.rms:.1f} ft)." if len(pairs) > 2 else ".")))
-                if abs(sim.scale - 1) > 0.03:
-                    found.append(Issue(severity="warning", code="match_scale", sheet=sid_of[new], page=rep_by_key[new].page,
-                                       message=f"The points matched between {sid_of[key]} and {sid_of[rk]} imply scales {abs(sim.scale - 1) * 100:.0f}% apart. "
-                                               "Check the points, or the sheets' scales."))
             for key in [k for k in placeable if k not in reg]:
                 for rk in [k for k in placeable if k in reg]:
                     if _same_view(rep_by_key[key], rep_by_key[rk], cals[key].ft_per_pt, cals[rk].ft_per_pt, furniture):

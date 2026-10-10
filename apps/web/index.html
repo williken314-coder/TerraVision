@@ -224,7 +224,7 @@ p{margin:0}
 #matchBox .mimg.next{outline:2px solid var(--accent)}
 #matchBox .dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid var(--accent);background:rgba(255,92,158,.35);pointer-events:none;font:600 10px var(--f-mono);color:#000;text-align:center;line-height:10px}
 #matchBox .mhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
-#matchBox select{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 8px}
+#matchBox select{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 8px;flex:1;min-width:0;max-width:100%;text-overflow:ellipsis}
 .calib .sc input{width:5.5em}
 #datumForm .calib{grid-template-columns:4.2em minmax(7em,1fr) minmax(0,1fr)}
 .srcimg{grid-column:1/-1;max-width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:4px}
@@ -739,10 +739,10 @@ $('#dockBody').addEventListener('click',async e=>{const b=e.target.closest('[dat
   else if(a==='sel'){if(getObj(id))select(id,{fly:true});}
   else if(a==='ask')ask(b.dataset.q);
   else if(a==='place')openMatch(b.dataset.doc,b.dataset.page,b.dataset.id);
-  else if(a==='mundo'){MATCH.taps.pop();renderMatch();}
+  else if(a==='mundo'){MATCH.taps.pop();updateMatch();}
   else if(a==='mcancel'){MATCH=null;renderMatch();}
   else if(a==='msave')saveMatch();
-  else if(a==='mzoom'){MATCH.zoom=Math.max(1,Math.min(4,MATCH.zoom*(+b.dataset.z>0?1.5:1/1.5)));renderMatch();}
+  else if(a==='mzoom'){MATCH.zoom=Math.max(1,Math.min(4,MATCH.zoom*(+b.dataset.z>0?1.5:1/1.5)));$('#matchBox').querySelectorAll('.mimg img').forEach(i=>i.style.width=MATCH.zoom*100+'%');}
   else if(a==='scale'){const inp=b.parentElement.querySelector('input'),v=parseFloat(inp.value);if(!(v>0)){toast('Enter feet per inch, e.g. 40');return;}
     try{toast('Recalibrating…');await refresh(await api(`/api/projects/${PRJ.id}/calibration`,jsonOpts('PUT',{document_id:b.dataset.doc,page:+b.dataset.page,scale_ft_per_in:v})),'Scale saved; model rebuilt');buildSite();buildUtil();flyHome();}catch(err){toast(err.message);}}});
 function goCross(cid){const c=crossings.find(x=>x.id===cid);if(!c)return;if(st.mode==='finished'||st.fps)setMode('xray');else setXray(true);if(st.stage<4)setStage(7);
@@ -767,8 +767,15 @@ function renderMatch(){const box=$('#matchBox');if(!MATCH){box.hidden=true;box.i
   box.querySelectorAll('.mimg').forEach(div=>div.querySelector('img').addEventListener('click',e=>{const w=div.dataset.w,want2=M.taps.length%2===0?'this':'ref';
     if(M.taps.length>=4){toast('Both points are matched; undo to change one');return;}
     if(w!==want2){toast(`Tap point ${Math.floor(M.taps.length/2)+1} on ${want2==='this'?M.id:M.ref.id} next`);return;}
-    const img=e.target,fx=e.offsetX/img.clientWidth,fy=e.offsetY/img.clientHeight;
-    M.taps.push({w,fx,fy,x:fx*img.naturalWidth*72/MDPI,y:fy*img.naturalHeight*72/MDPI});renderMatch();}));}
+    const img=e.target;if(!img.complete||!img.naturalWidth){toast('The sheet is still loading');return;}
+    const fx=e.offsetX/img.clientWidth,fy=e.offsetY/img.clientHeight;
+    M.taps.push({w,fx,fy,x:fx*img.naturalWidth*72/MDPI,y:fy*img.naturalHeight*72/MDPI});updateMatch();}));
+  updateMatch();}
+function updateMatch(){const M=MATCH,box=$('#matchBox');if(!M)return;const n=M.taps.length,want=n%2===0?'this':'ref';
+  box.querySelectorAll('.mimg').forEach(div=>{div.querySelectorAll('.dot').forEach(d=>d.remove());div.classList.toggle('next',div.dataset.w===want&&n<4);
+    M.taps.forEach((t,i)=>{if(t.w!==div.dataset.w)return;const d=document.createElement('span');d.className='dot';d.style.left=t.fx*100+'%';d.style.top=t.fy*100+'%';d.textContent=Math.floor(i/2)+1;div.appendChild(d);});});
+  $('#mStat').textContent=n>=4?'Both points matched. Place the sheet, or undo to adjust.':`Point ${Math.floor(n/2)+1}: tap it on ${want==='this'?M.id:M.ref.id}.`;
+  box.querySelector('[data-act=mundo]').disabled=!n;box.querySelector('[data-act=msave]').disabled=n<4;}
 async function saveMatch(){const M=MATCH,t=M.taps,pairs=[[t[0].x,t[0].y,t[1].x,t[1].y],[t[2].x,t[2].y,t[3].x,t[3].y]];
   try{toast('Placing…');const r=await api(`/api/projects/${PRJ.id}/match`,jsonOpts('PUT',{document_id:M.doc,page:M.page,ref_document_id:M.ref.document_id,ref_page:M.ref.page,pairs}));
     MATCH=null;renderMatch();await refresh(r,`${M.id} placed`);lastPaint='';buildSite();buildUtil();}catch(err){toast(err.message);}}

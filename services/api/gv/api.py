@@ -5,6 +5,7 @@ Then open http://localhost:8000 for the app.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from .ingest.pdf import page_count, render_page_png
 from .models import Datum, Project
 from .processing import is_landxml_doc, process_document, rebuild_project
 
+MATCH_SCALE_TOLERANCE = 0.05  # matched points may disagree on distance by this much (tap precision)
 MAX_UPLOAD_MB = int(os.environ.get("GV_MAX_UPLOAD_MB", "200"))
 def _web_dir() -> Path:
     if os.environ.get("GV_WEB_DIR"):
@@ -269,6 +271,15 @@ def set_match(pid: str, m: Match, db: Session = Depends(get_db)):
     key, ref = f"{m.document_id}:{m.page}", f"{m.ref_document_id}:{m.ref_page}"
     if key == ref:
         raise HTTPException(422, "Match against a different sheet")
+    if m.pairs:  # the two distances must agree at the sheets' scales, or the points aren't the same spots
+        scale = {s.document_id + ":" + str(s.page): s.scale_ft_per_in for s in prj.sheets if s.document_id}
+        if not scale.get(key) or not scale.get(ref):
+            raise HTTPException(422, "Set both sheets' scales before matching points")
+        (a, b, c, d), (e, f, g, h) = m.pairs[0], m.pairs[1]
+        mine, theirs = math.hypot(e - a, f - b) * scale[key], math.hypot(g - c, h - d) * scale[ref]
+        if theirs <= 0 or abs(mine / theirs - 1) > MATCH_SCALE_TOLERANCE:
+            raise HTTPException(422, f"Those points are {mine / 72:.0f} ft apart on one sheet and {theirs / 72:.0f} ft on the other, "
+                                     "so they aren't the same two spots (or a sheet's scale is wrong). Undo and try again.")
     ov = dict(row.overrides or {})
     sheets = dict(ov.get("sheets", {}))
     entry = dict(sheets.get(key, {}))
