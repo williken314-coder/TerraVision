@@ -67,7 +67,7 @@ def answer(prj: Project, q: str, selected: str | None = None) -> dict:
             inv = "; ".join(f"{i['elev']:.2f}" + (f" ({i['side']})" if i.get("side") else "") for i in u.inverts)
             return done(f"**{cand}**{f' ({u.type})' if u.type else ''}: rim **{_fmt(u.rim)}**" + (f", inverts {inv}" if inv else "")
                         + f", from the structure table on {u.source or ', '.join(u.sheets)} (read by TerraVision; confirm against the plans). "
-                        "It isn't shown in the 3D model yet because the sheets it's drawn on aren't placed: use Plans → Sheets & calibration → **Place**.",
+                        "It isn't shown in the 3D model yet because the sheets it's drawn on aren't placed: use Plans → Sheets & calibration → **Place by hand**.",
                         [], [u.source] if u.source else u.sheets)
         if not oid:
             return done(f"I can't find **{cand}** in the extracted data. Known structures: {', '.join(s.id for s in prj.structures[:20]) or 'none yet'}.")
@@ -134,7 +134,7 @@ def answer(prj: Project, q: str, selected: str | None = None) -> dict:
                     on = sorted({x for u in found for x in u.sheets})
                     return done(f"I found {len(found)} {SYS_NAME[sys]} structures by name ({', '.join(u.id for u in found)}) on {', '.join(on)}, "
                                 "but those sheets aren't placed in the model yet, so I can't show where they are. "
-                                "Place one of them in Plans → Sheets & calibration → **Place**: tap the same two spots on it and on a placed sheet.",
+                                "Place one of them in Plans → Sheets & calibration → **Place by hand**: tap the same two spots on it and on a placed sheet.",
                                 [], on)
                 return done(f"No {SYS_NAME[sys]} was extracted from the uploaded sheets.")
             lf = sum(a["pipes"][p.id]["length"] for p in ps) + sum(a["lines"][l.id]["length"] for l in ls)

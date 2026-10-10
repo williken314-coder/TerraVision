@@ -47,6 +47,7 @@ PIPE = re.compile(r"(?:(\d+(?:\.\d+)?)\s*(?:LF|L\.F\.)\s*(?:OF\s*)?)?(\d{1,2})\s
 SPOT = re.compile(r"\b(FG|TC|BC|FFE|FF|EG|TW|BW|HP|LP|FL|PAD)\s*[=:]?\s*(\d{3,4}\.\d{1,2})\b|\b(\d{3,4}\.\d{1,2})\s*(FG|TC|BC|FFE|FF|EG|TW|BW|FL|PAD)\b", re.I)
 CONTOUR_LABEL = re.compile(r"^\s*(\d{3,4})(?:\.0)?\s*$")
 STATION = re.compile(r"\bSTA\.?\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
+NAMED_STATION = re.compile(r"^\s*(?:STA\.?\s*)?(\d{1,4})\+(\d{2}(?:\.\d+)?)\s*([A-Z][A-Z0-9]{0,3})\s*,?\s*$")  # 12+00A, 1+00P1L
 BARE_STATION = re.compile(r"^\s*(\d{1,4})\+(\d{2}(?:\.\d+)?)\s*$")  # tick labels along a centerline
 MATCHLINE = re.compile(r"MATCH\s*-?\s*LINE\b[^+]{0,20}?(\d{1,4})\+(\d{2}(?:\.\d+)?)", re.I)
 SEE_SHEET = re.compile(r"SEE\s+(?:SHEET|SHT\.?|DWG\.?)\s*([CEALSUG])-?\s?(\d{1,2}\.\d{1,2})", re.I)
@@ -441,6 +442,10 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category, title: s
                 out.append(Candidate("matchline", m.group(0), {"station": int(m.group(1)) * 100 + float(m.group(2)),
                                                                "sheet_ref": f"{ref.group(1).upper()}-{ref.group(2)}" if ref else None}, page, s.x, s.y, bb(s), s.text, 0.9))
                 continue
+            m = NAMED_STATION.match(s.text)
+            if m:  # a station on a named alignment: the same label on two sheets is the same point on the ground
+                out.append(Candidate("named_station", s.text.strip().rstrip(",").replace(" ", ""), {"station": int(m.group(1)) * 100 + float(m.group(2)),
+                                                                                       "alignment": m.group(3)}, page, s.x, s.y, bb(s), s.text, 0.85))
             m = BARE_STATION.match(s.text)
             if m and not STATION.search(s.text):
                 out.append(Candidate("station", s.text.strip(), {"station": int(m.group(1)) * 100 + float(m.group(2))}, page, s.x, s.y, bb(s), s.text, 0.8))
@@ -486,6 +491,34 @@ def extract_candidates(spans, symbols, polys, page, size_ref, category, title: s
                     "pts": [[round(x, 2), round(y, 2)] for x, y in p.pts]}, page, s.x, s.y, bb(s), s.text,
                     0.8 if p.dashed or category == "grading" else 0.7))
         out += _unlabelled_contours(long_polys, labels, page, size_ref, surface_role)
+    elif category in PLAN_CATEGORIES:
+        # other plan sheets draw contours too. Their labels aren't used for the ground (a profile grid's labels sit on
+        # grid lines), but a labelled contour is the same line on every sheet that shows that ground: it ties sheets together.
+        out += _link_contours(spans, polys, page, size_ref)
+    return out
+
+
+def _link_contours(spans, polys, page, size_ref) -> list[Candidate]:
+    """Labelled, curving contours for placing sheets against each other ("link_only": not used for surfaces)."""
+    def curving(p):
+        a, b = np.asarray(p.pts[0], float), np.asarray(p.pts[-1], float)
+        d = b - a
+        L = math.hypot(*d)
+        if L < 1e-6:
+            return True
+        q = np.asarray(p.pts, float) - a
+        off = np.abs(d[0] * q[:, 1] - d[1] * q[:, 0]) / L
+        return off.max() > max(size_ref * 0.5, p.length * 0.02)  # grid lines and straight edges are not contours
+    long_polys = [p for p in polys if p.length > size_ref * 3 and len(p.pts) >= 3 and curving(p)]
+    out = []
+    for s in spans:
+        m = CONTOUR_LABEL.match(s.text)
+        if not m or not long_polys:
+            continue
+        d, p = min(((_dist_point_poly(s.x, s.y, p.pts), p) for p in long_polys), key=lambda t: t[0])
+        if d < s.size * 1.2:
+            out.append(Candidate("contour", m.group(1), {"elev": float(m.group(1)), "dashed": p.dashed, "surface": None, "link_only": True,
+                                                         "pts": [[round(x, 2), round(y, 2)] for x, y in p.pts]}, page, s.x, s.y, [round(v, 2) for v in s.bbox], s.text, 0.5))
     return out
 
 

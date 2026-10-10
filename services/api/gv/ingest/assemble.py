@@ -24,6 +24,7 @@ from ..geometry.alignment import offset_label, station_label
 from ..models import EDGE_CODES, EDGE_NAMES, Alignment, AlignmentPoint, CorridorTemplate, Fact, GridSurface, Issue, Pipe, RoadEdge, Sheet, Status, Structure
 from .calibration import SheetCalibration, Similarity, fit_similarity, ft_per_pt
 from .pdf import PLAN_CATEGORIES, PROFILE_CATEGORIES, ROAD_CATEGORIES, SheetReport
+from .linking import match_contours, sample_contours
 from .roadway import link_by_stationing, read_roadway_sheet
 
 SYSTEM_BY_PREFIX = {"CB": "storm", "INL": "storm", "DI": "storm", "HW": "storm", "FES": "storm", "STMH": "storm",
@@ -169,6 +170,14 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                                     message=f"{sid_of[k]}: {fit[1]} printed coordinates fit the sheet to {fit[0].rms:.1f} ft RMS"
                                             + (f"; {fit[2]} more didn't fit and were left out (a leader followed to the wrong spot?)" if fit[2] else "") + "."))
 
+    # labelled contours on each sheet, in sheet feet: the same line on every sheet that shows that ground
+    cpts: dict[str, dict] = {}
+    for k in placeable:
+        lines = [(c.values["elev"], _surface_role(c), [[x * cals[k].ft_per_pt, y * cals[k].ft_per_pt] for x, y in c.values["pts"]])
+                 for c in rep_by_key[k].candidates if c.kind == "contour" and c.values.get("pts")]
+        if len({e for e, _, _ in lines}) >= 3:
+            cpts[k] = sample_contours(lines)
+
     def own_frame(k: str) -> Similarity | None:
         ctrl = ctrl_of.get(k)
         if ctrl and len(ctrl) >= 2:
@@ -242,6 +251,17 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                 found.append(Issue(severity="info", code="placed_by_match", sheet=sid_of[new], page=rep_by_key[new].page,
                                    message=f"{sid_of[new]} placed from {len(pairs)} points you matched with {sid_of[old]}"
                                            + (f" (they agree to {sim.rms:.1f} ft)." if len(pairs) > 2 else ".")))
+            # station labels on named alignments ("1+00P1L") printed on both sheets
+            for key in [k for k in placeable if k not in reg]:
+                for rk in [k for k in placeable if k in reg]:
+                    link = _link_by_named_stations(rep_by_key[key], rep_by_key[rk], cals[key].ft_per_pt, cals[rk].ft_per_pt, reg[rk])
+                    if link:
+                        reg[key] = link[0]
+                        changed = True
+                        found.append(Issue(severity="info", code="placed_by_named_stations", sheet=sid_of[key], page=rep_by_key[key].page,
+                                           message=f"{sid_of[key]} placed from {link[1]} alignment station labels it shares with {sid_of[rk]} "
+                                                   f"({', '.join(link[2][:4])}{'…' if len(link[2]) > 4 else ''}; they agree to {link[0].rms:.1f} ft)."))
+                        break
             for key in [k for k in placeable if k not in reg]:
                 for rk in [k for k in placeable if k in reg]:
                     if _same_view(rep_by_key[key], rep_by_key[rk], cals[key].ft_per_pt, cals[rk].ft_per_pt, furniture):
@@ -250,6 +270,16 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                         found.append(Issue(severity="info", code="placed_by_marks", sheet=sid_of[key], page=rep_by_key[key].page,
                                            message=f"{sid_of[key]} placed with {sid_of[rk]}: both are drawn at the same scale in the same view, with reference marks at the same spots."))
                         break
+            if not changed:  # the costlier search last: contours of equal elevation drawn on both
+                link = _link_by_contours([k for k in cpts if k not in reg], {k: reg[k] for k in cpts if k in reg}, cpts)
+                if link:
+                    key, sim, stats, refs = link
+                    reg[key] = sim
+                    changed = True
+                    found.append(Issue(severity="info", code="placed_by_contours", sheet=sid_of[key], page=rep_by_key[key].page,
+                                       message=f"{sid_of[key]} placed by its contours: {stats['elevations']} elevations lie on the same contours of "
+                                               f"{', '.join(sid_of[r] for r in refs)} ({stats['fraction'] * 100:.0f}% of the overlapping line work, "
+                                               f"median {stats['median_ft']:.2f} ft apart)."))
         return reg, found
 
     # every group of sheets that link to each other; the model is built on the most useful group
@@ -275,12 +305,12 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                 continue
             issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[keys[0]], page=rep_by_key[keys[0]].page,
                                 message=f"{', '.join(sid_of[k] for k in keys)} line up with each other but are not tied to the model's sheets ({model}): "
-                                        "no shared structures, matchline or reference marks. Add control points to place them."))
+                                        "no shared structures, matchline, contours, station labels or reference marks. Use Place by hand, or add control points, to place them."))
         if singles:
             singles.sort(key=list(rep_by_key).index)
             issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[singles[0]], page=rep_by_key[singles[0]].page,
                                 message=f"{', '.join(sid_of[k] for k in singles)} {'are' if len(singles) > 1 else 'is'} not tied to the model's sheets ({model}) "
-                                        f"or to each other: no shared structures, matchline or reference marks. Add control points to place {'them' if len(singles) > 1 else 'it'}."))
+                                        f"or to each other: no shared structures, matchline, contours, station labels or reference marks. Use Place by hand, or add control points, to place {'them' if len(singles) > 1 else 'it'}."))
     for key, sim in registered.items():
         cals[key].to_project = sim
         for s in sheets:
@@ -418,6 +448,9 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     # 6. surfaces --------------------------------------------------------------
     pts = {"existing": [], "proposed": []}
     derived_on: list[str] = []
+    # a sheet titled "Existing grade" or "Finished grade" says what its contours are; where one is placed, contours whose
+    # surface is only guessed from their linetype (on detail sheets that draw both) are left to it
+    declared = {c.values["surface"] for k in registered for c in _surface_candidates(rep_by_key[k]) if c.kind == "contour" and c.values.get("surface")}
     for key, r in rep_by_key.items():
         if key not in registered:
             continue
@@ -435,6 +468,8 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             if id(c) in skip:
                 continue
             which = _surface_role(c)
+            if c.kind == "contour" and not c.values.get("surface") and which in declared:
+                continue
             if c.kind == "spot":
                 if which:
                     x, z = cal.pt_to_project(c.x, c.y)
@@ -738,7 +773,27 @@ def _surface_candidates(r: SheetReport):
     "EG 985.32 / FG 984.10" labels and elevation grid lines belong to the profile, not to points on the plan."""
     if r.category in ROAD_CATEGORIES:
         return []
-    return [c for c in r.candidates if c.kind in ("spot", "contour")]
+    out = [c for c in r.candidates if c.kind in ("spot", "contour") and not c.values.get("link_only")]
+    rows = _profile_rows([c for c in out if c.kind == "spot"])
+    return [c for c in out if id(c) not in rows]
+
+
+def _profile_rows(spots) -> set[int]:
+    """Spot labels in an evenly spaced row (or column): a profile's EG/FG elevations at each station, not points on the plan."""
+    out = set()
+    for axis in (0, 1):
+        by = defaultdict(list)
+        for c in spots:
+            by[(c.label, round((c.y, c.x)[axis] / 4))].append(c)
+        for row in by.values():
+            if len(row) < 4:
+                continue
+            pos = np.sort([(c.x, c.y)[axis] for c in row])
+            gaps = np.diff(pos)
+            g = np.median(gaps)
+            if g > 0 and np.mean(np.abs(gaps - g) < g * 0.1) >= 0.7:
+                out |= {id(c) for c in row}
+    return out
 
 
 def _surface_role(c) -> str | None:
@@ -799,3 +854,47 @@ def _type_fact(types: list[tuple]) -> Fact:
     t, sheet, page, doc, bbox = types[0]
     agree = len({x[1] for x in types if x[0] == t})
     return Fact[str](value=t, status=Status.verified if agree >= 2 else Status.ai, confidence=0.9, source=sheet, page=page, document_id=doc, text=t)
+
+
+def _link_by_named_stations(a: SheetReport, b: SheetReport, ka: float, kb: float, b_to_project):
+    """Place sheet a from station labels on named alignments that sheet b (placed) also prints.
+
+    "1+00P1L" on two sheets is one point on the ground. Label text sits a little off its tick, but drafted with the
+    same label style on sheets of the same scale that offset largely cancels; a fit over three or more labels,
+    spread out, that agrees within a few feet is accepted. Returns (Similarity, labels used, labels) or None.
+    """
+    def labels(r):
+        seen = defaultdict(list)
+        for c in r.candidates:
+            if c.kind == "named_station":
+                seen[c.label].append((c.x, c.y))
+        return {t: v[0] for t, v in seen.items() if len(v) == 1}  # a label printed twice on a sheet is ambiguous
+    la, lb = labels(a), labels(b)
+    common = sorted(set(la) & set(lb))
+    if len(common) < 3 or abs(ka / kb - 1) > 0.01:  # different scales: label offsets no longer cancel
+        return None
+    src = np.array([[la[t][0] * ka, la[t][1] * ka] for t in common])
+    dst = np.column_stack(b_to_project.apply(np.array([lb[t][0] * kb for t in common]), np.array([lb[t][1] * kb for t in common])))
+    if np.ptp(src, axis=0).max() < 100:
+        return None
+    sim = fit_similarity(src, dst, allow_scale=False)
+    return (sim, len(common), common) if sim.rms <= 6.0 else None
+
+
+def _link_by_contours(unplaced: list[str], placed: dict[str, Similarity], cpts: dict[str, dict]):
+    """The unplaced sheet whose contours best lie on a placed sheet's contours of the same elevation:
+    (key, Similarity, stats, [reference key]) or None. Matched sheet to sheet, each in its own feet (exact
+    to hundredths), then carried into the project frame through the reference sheet's placement."""
+    best = None
+    for key in unplaced:
+        for rk, rsim in placed.items():
+            got = match_contours(cpts[key], cpts[rk])
+            if got and (best is None or got[1]["matched"] > best[2]["matched"]):
+                best = (key, _then(got[0], rsim), got[1], [rk])
+    return best
+
+
+def _then(a: Similarity, b: Similarity) -> Similarity:
+    """a, then b."""
+    x, z = b.apply(a.tx, a.tz)
+    return Similarity(scale=a.scale * b.scale, theta=a.theta + b.theta, tx=float(x), tz=float(z), rms=a.rms, n=a.n)
