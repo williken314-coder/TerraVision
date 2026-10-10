@@ -772,10 +772,11 @@ $('#newPrjForm').addEventListener('submit',async e=>{e.preventDefault();const n=
 $('#upl').addEventListener('change',async e=>{const f=e.target.files[0];e.target.value='';if(!f||!PRJ)return;const fd=new FormData();fd.append('file',f);
   $('#uplNote').textContent=`Uploading ${f.name}…`;try{const r=await api(`/api/projects/${PRJ.id}/documents`,{method:'POST',body:fd});pollDoc(r.id,f.name);}catch(err){$('#uplNote').textContent='Upload failed: '+err.message;}});
 async function pollDoc(did,name){const t0=Date.now();for(;;){await new Promise(r=>setTimeout(r,1200));let d;try{d=await api(`/api/documents/${did}`);}catch(e){$('#uplNote').textContent=e.message;return;}
-  if(d.status==='done'&&d.kind==='landxml'){$('#uplNote').textContent=`Read ${d.surfaces.length} surface${d.surfaces.length===1?'':'s'}: ${d.surfaces.map(s=>s.name).join(', ')}.`;await openProject(PRJ.id);openTab('review');
+  // reloading the project redraws the Plans panel, so the result is written after it
+  if(d.status==='done'&&d.kind==='landxml'){await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.surfaces.length} surface${d.surfaces.length===1?'':'s'}: ${d.surfaces.map(s=>s.name).join(', ')}.`;
     const used=(PRJ.imported_surfaces||[]).filter(s=>s.used).map(s=>`<b>${esc(s.name)}</b> as the ${s.role==='existing'?'existing ground':'finished grade'}`);
     say('a',`Imported <b>${esc(name)}</b>. ${used.length?'Using '+used.join(' and ')+'.':'No surface could be assigned from its name; choose roles in Plans → Imported surfaces.'}`);return;}
-  if(d.status==='done'){const sheets=d.sheets.map(s=>`${s.sheet_id||'p'+(s.page+1)} (${s.category.replace('_',' ')})`).join(', ');$('#uplNote').textContent=`Read ${d.pages} pages: ${sheets}.`;await openProject(PRJ.id);openTab('review');
+  if(d.status==='done'){const sheets=d.sheets.map(s=>`${s.sheet_id||'p'+(s.page+1)} (${s.category.replace('_',' ')})`).join(', ');await openProject(PRJ.id);openTab('review');$('#uplNote').textContent=`Read ${d.pages} pages: ${sheets}.`;
     say('a',`Finished reading <b>${esc(name)}</b>: ${d.pages} pages, ${PRJ.structures.length} structures, ${PIPES.length} pipes${PRJ.proposed?', a finished-grade surface':''}${PRJ.existing?', an existing surface':''}. ${(AN.review||[]).length} values need your confirmation and ${(AN.issues||[]).filter(i=>i.severity!=='info').length} issues are listed in Plans.`);return;}
   if(d.status==='failed'){$('#uplNote').textContent='Processing failed: '+(d.error||'unknown error');return;}
   $('#uplNote').textContent=`${d.status==='queued'?'Queued':'Reading'} ${name}${d.kind==='pdf'?`: ${d.pages} pages`:''}… ${Math.round((Date.now()-t0)/1000)}s`;}}
