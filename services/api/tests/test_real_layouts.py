@@ -187,3 +187,13 @@ def test_assistant_explains_structures_found_on_unplaced_sheets():
     assert "CB-1, DI-2" in a["text"] and "aren't placed" in a["text"] and "Place" in a["text"]
     assert {"C07", "C08", "C11"} <= set(a["sources"])
     assert answer(Project(id="q", name="q"), "Show me every storm pipe")["text"].startswith("No storm")
+
+
+def test_assistant_reads_out_a_table_structure_not_yet_placed():
+    from gv.assistant import answer
+    from gv.models import Project, UnplacedStructure
+
+    prj = Project(id="p", name="p", unplaced=[UnplacedStructure(id="CB-6", system="storm", sheets=["C10", "C11"], rim=876.2, source="C10",
+                                                                type="CB TYPE 2 48 IN. DIAM.", inverts=[dict(elev=869.76, side="W", dir=None)])])
+    a = answer(prj, "What's the rim of CB #6?")
+    assert "876.20" in a["text"] and "869.76 (W)" in a["text"] and "C10" in a["sources"] and "Place" in a["text"]

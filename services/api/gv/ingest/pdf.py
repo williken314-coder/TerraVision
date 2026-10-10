@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from . import contours, control, ocr
+from . import contours, control, ocr, tables
 from .roadway import chain_segments, edge_label_kind
 
 try:
@@ -341,7 +341,18 @@ def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: li
         return report
 
     size_ref = max(12.0, min(w, h) * 0.02)
-    report.candidates = extract_candidates(spans, symbols, polys, index, size_ref, category, title)
+    # structure tables give rims and inverts but no locations: their text stays out of the plan reading
+    rows, used = tables.structure_tables(spans)
+    plan_spans = [s for s in spans if id(s) not in used] if used else spans
+    report.candidates = extract_candidates(plan_spans, symbols, polys, index, size_ref, category, title)
+    for r in rows:
+        vals = {"inverts": [dict(i, confidence=0.9) for i in r["inverts"]], "label_xy": None, "table": True}
+        if "rim" in r:
+            vals.update(rim=r["rim"], rim_confidence=0.9, rim_text=f"{r['id']} row: {r['rim_text']}", rim_bbox=r["rim_bbox"])
+        for k in ("station", "type"):
+            if k in r:
+                vals[k] = r[k]
+        report.candidates.append(Candidate("structure", r["id"], vals, index, r["bbox"][0], r["bbox"][1], r["bbox"], r["text"], 0.9))
     # thick, solid lines on plan sheets are pipe candidates
     if category in PLAN_CATEGORIES:
         widths = sorted(s.width for s in segs if s.length > 6)

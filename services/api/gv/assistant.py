@@ -21,7 +21,7 @@ from .models import Project
 
 SYS_WORDS = [("storm", r"storm|drain|catch|inlet|culvert"), ("san", r"sanit|sewer"), ("water", r"water|hydrant"), ("elec", r"electric|power|conduit|light")]
 SYS_NAME = {"storm": "storm", "san": "sanitary sewer", "water": "water", "elec": "electrical"}
-ID_RE = re.compile(r"\b(CB|SMH|STMH|MH|HW|FES|FH|INL|DI|WV|TX|ST|SA|WL|EL|W|E)\s?-?\s?(\d{1,3}[A-Z]?)\b", re.I)
+ID_RE = re.compile(r"\b(CB|SMH|STMH|MH|HW|FES|FH|INL|DI|WV|TX|ST|SA|WL|EL|W|E)\s?(?:#|NO\.?)?\s?-?\s?(\d{1,3}[A-Z]?)\b", re.I)
 
 
 def _fmt(v, nd=2):
@@ -60,6 +60,15 @@ def answer(prj: Project, q: str, selected: str | None = None) -> dict:
     if m:
         cand = f"{m.group(1).upper()}-{m.group(2).upper()}"
         oid = cand if prj.find(cand) else None
+        u = next((u for u in prj.unplaced if u.id == cand), None)
+        if not oid and u:
+            if u.rim is None and not u.inverts:
+                return done(f"**{cand}** is named on {', '.join(u.sheets)}, but no rim or inverts were read for it, and those sheets aren't placed in the model yet.", [], u.sheets)
+            inv = "; ".join(f"{i['elev']:.2f}" + (f" ({i['side']})" if i.get("side") else "") for i in u.inverts)
+            return done(f"**{cand}**{f' ({u.type})' if u.type else ''}: rim **{_fmt(u.rim)}**" + (f", inverts {inv}" if inv else "")
+                        + f", from the structure table on {u.source or ', '.join(u.sheets)} (read by TerraVision; confirm against the plans). "
+                        "It isn't shown in the 3D model yet because the sheets it's drawn on aren't placed: use Plans → Sheets & calibration → **Place**.",
+                        [], [u.source] if u.source else u.sheets)
         if not oid:
             return done(f"I can't find **{cand}** in the extracted data. Known structures: {', '.join(s.id for s in prj.structures[:20]) or 'none yet'}.")
     elif selected and re.search(r"\bthis\b|\bit\b|selected", t) and prj.find(selected):

@@ -255,6 +255,10 @@ class UnplacedStructure(BaseModel):
     id: str
     system: System
     sheets: list[str]
+    rim: Optional[float] = None  # as read (a structure table, a callout); values, not a location
+    inverts: list[dict] = []  # {elev, side, dir}
+    type: Optional[str] = None
+    source: Optional[str] = None  # sheet the rim was read on
 
 
 class Project(BaseModel):

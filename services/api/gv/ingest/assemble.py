@@ -288,7 +288,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                 s.registered = True
 
     # 4. merge structures ----------------------------------------------------
-    by_id: dict[str, dict] = defaultdict(lambda: {"pos": [], "rims": [], "invs": [], "sheets": set(), "cats": set()})
+    by_id: dict[str, dict] = defaultdict(lambda: {"pos": [], "rims": [], "invs": [], "sheets": set(), "cats": set(), "types": []})
     for key, r in rep_by_key.items():
         for c in r.candidates:
             if c.kind != "structure":
@@ -301,6 +301,8 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                                       bbox=c.values.get("rim_bbox"), text=c.values.get("rim_text"), doc=doc_of[key]))
             for inv in c.values["inverts"]:
                 e["invs"].append(dict(inv, v=inv["elev"] + elevation_offset, sheet=sid_of[key], page=r.page, doc=doc_of[key]))
+            if c.values.get("type"):
+                e["types"].append((c.values["type"], sid_of[key], r.page, doc_of[key], c.bbox))
             if key in registered and c.label in local.get(key, {}):
                 p = local[key][c.label]
                 x, z = registered[key].apply(p[0], p[1])
@@ -314,7 +316,10 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cat = next((c for c in e["cats"] if c in PLAN_CATEGORIES), next(iter(e["cats"])))
         system = _system_for(prefix, cat)
         if not e["pos"]:
-            unplaced.append((sid, sorted(e["sheets"]), system))
+            rim0 = max(e["rims"], key=lambda v: v["conf"]) if e["rims"] else None
+            unplaced.append((sid, sorted(e["sheets"]), system, dict(
+                rim=round(rim0["v"], 2) if rim0 else None, source=rim0["sheet"] if rim0 else None, type=e["types"][0][0] if e["types"] else None,
+                inverts=[dict(elev=round(i["v"], 2), side=i.get("side"), dir=i.get("dir")) for i in e["invs"]])))
             continue
         xs = np.array([p["x"] for p in e["pos"]])
         zs = np.array([p["z"] for p in e["pos"]])
@@ -329,15 +334,15 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         no_rim = KIND_BY_PREFIX.get(prefix) == "HW" and not e["rims"]
         rim = _merge_values(e["rims"], f"{sid} rim", sid, [] if no_rim else issues)
         structures.append(Structure(id=sid, system=system, kind=KIND_BY_PREFIX.get(prefix, "OTHER"), x=position.value[0], z=position.value[1],
-                                    position=position, rim=rim, type=Fact[str](value=None, status=Status.missing), sheet=best_pos["sheet"]))
+                                    position=position, rim=rim, type=_type_fact(e["types"]), sheet=best_pos["sheet"]))
         invs_by_id[sid] = e["invs"]
 
     if len(unplaced) <= 3:
-        for sid, on, _ in unplaced:
+        for sid, on, *_ in unplaced:
             issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(on)} but not on a scaled, registered plan sheet, so it has no location."))
     elif unplaced:
-        on = sorted({x for _, x_, _ in unplaced for x in x_})
-        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(s_ for s_, _, _ in unplaced)}) appear only on sheets that aren't placed in the model "
+        on = sorted({x for _, x_, *_ in unplaced for x in x_})
+        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(u_[0] for u_ in unplaced)}) appear only on sheets that aren't placed in the model "
                                                                              f"({', '.join(on)}), so they have no location yet."))
 
     # 5. pipes from plan line work ------------------------------------------
@@ -482,7 +487,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         corridor.pavement_section = _pavement_section(rep_by_key, sid_of, doc_of, issues)
 
     return dict(sheets=sheets, structures=structures, pipes=pipes, existing=surfaces.get("existing"), proposed=surfaces.get("proposed"),
-                alignment=alignment, corridor=corridor, issues=issues, unplaced=[dict(id=a, sheets=b, system=c) for a, b, c in unplaced], real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
+                alignment=alignment, corridor=corridor, issues=issues, unplaced=[dict(id=a, sheets=b, system=c, **d) for a, b, c, d in unplaced], real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
                                                      transform=c.to_project.as_dict() if c.to_project else None) for k, c in cals.items()})
 
 
@@ -785,3 +790,12 @@ def _fit_printed_control(points: list[dict], ft_per_pt: float, e0: float, n0: fl
         return None
     sim.n = int(keep.sum())
     return sim, int(keep.sum()), int((~keep).sum())
+
+
+def _type_fact(types: list[tuple]) -> Fact:
+    """A structure's type as a structure table states it ("CB TYPE 2 48 IN. DIAM."), or missing."""
+    if not types:
+        return Fact[str](value=None, status=Status.missing)
+    t, sheet, page, doc, bbox = types[0]
+    agree = len({x[1] for x in types if x[0] == t})
+    return Fact[str](value=t, status=Status.verified if agree >= 2 else Status.ai, confidence=0.9, source=sheet, page=page, document_id=doc, text=t)
