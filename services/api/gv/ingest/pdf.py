@@ -319,7 +319,8 @@ def build_report(index: int, w: float, h: float, spans: list[TextSpan], segs: li
                  common: set[str] | frozenset = frozenset()) -> SheetReport:
     """Everything after raw extraction. Separate from PyMuPDF so it can be tested on recorded layouts."""
     sheet_id, title, tb_text = title_block(spans, w, h, common)
-    category = classify(title) if classify(title) != "unknown" else classify(tb_text)
+    # the title says what the sheet is; loose title-block text only counts on a numbered sheet (not a cover)
+    category = classify(title) if classify(title) != "unknown" else classify(tb_text) if sheet_id else "unknown"
     scale, scale_text = parse_scale("\n".join(s.text for s in spans))
 
     report = SheetReport(page=index, sheet_id=sheet_id, title=title, category=category, scale_ft_per_in=scale,

@@ -135,5 +135,6 @@ def test_model_is_built_on_the_earthwork_group():
     assert res["existing"] is not None and res["proposed"] is not None
     codes = [(i.code, i.sheet) for i in res["issues"]]
     assert ("placed_by_marks", "G04") in codes
-    msgs = [i.message for i in res["issues"] if i.code == "unregistered_sheet" and i.sheet == "C07"]
-    assert msgs and "lines up with C07, C08" in msgs[0]
+    msgs = [i.message for i in res["issues"] if i.code == "unregistered_sheet"]
+    assert msgs == ["C07, C08 line up with each other but are not tied to the model's sheets (G03, G04): no shared structures, matchline "
+                    "or reference marks. Add control points to place them."]

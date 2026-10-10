@@ -60,7 +60,8 @@ class TIN:
 
     def __init__(self, x, z, e, max_edge: float | None = None):
         """``max_edge``: drop triangles with a longer side, so the surface doesn't bridge gaps the source never
-        covered (finished-grade contours drawn only inside the work limits, say)."""
+        covered (finished-grade contours drawn only inside the work limits, say). Long triangles whose corners are
+        all at one elevation are kept: they are flat ground inside one contour (a pad, pond floor, stockpile top)."""
         self.pts = np.column_stack([x, z]).astype(float)
         self.e = np.asarray(e, dtype=float)
         self.tri = Delaunay(self.pts)
@@ -68,7 +69,12 @@ class TIN:
         if max_edge:
             P = self.pts[self.tri.simplices]
             sides = np.linalg.norm(P - np.roll(P, 1, axis=1), axis=2)
-            self.dropped = sides.max(axis=1) > max_edge
+            E = self.e[self.tri.simplices]
+            flat = np.ptp(E, axis=1) <= 0.01  # all three corners on one contour: a pad, pond floor or stockpile top
+            self.dropped = (sides.max(axis=1) > max_edge) & ~flat
+        a, b, c = (self.pts[self.tri.simplices[:, i]] for i in range(3))
+        area = 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))
+        self.dropped_area = float(area[self.dropped].sum())  # sq ft of the triangulation left empty
 
     def sample(self, x, z):
         q = np.column_stack([np.ravel(x), np.ravel(z)])

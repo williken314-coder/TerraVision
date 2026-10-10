@@ -76,6 +76,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     doc_of: dict[str, str] = {}
 
     # 1. sheets and scale calibration -------------------------------------
+    ocr_scales = []
     for doc_id, r in reports:
         key = sheet_key(doc_id, r.page)
         rep_by_key[key], doc_of[key] = r, doc_id
@@ -87,18 +88,22 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         sheets.append(Sheet(id=sid, title=r.title or "(untitled)", category=r.category, page=r.page, document_id=doc_id,
                             scale_ft_per_in=scale, notes=f"{len(r.candidates)} labelled items, {r.line_segments} line segments"))
         if r.scale_source == "ocr" and not ov.get("scale_ft_per_in"):
-            issues.append(Issue(severity="info", code="scale_by_ocr", sheet=sid, page=r.page,
-                                message=f"{sid}: scale {r.scale_text}. It is drawn as line strokes, not text, so it was read from the drawing; check it in Plans → Sheets & calibration."))
+            ocr_scales.append((sid, r.scale_ft_per_in, r.page))
         for n in r.notes:
             issues.append(Issue(severity="warning" if "scale" in n.lower() else "blocker", code="sheet_note", message=n, sheet=sid, page=r.page))
         if not r.sheet_id:
             issues.append(Issue(severity="info", code="no_sheet_number", message=f"Page {r.page + 1}: no sheet number found in the title block.", page=r.page))
 
+    if ocr_scales:
+        issues.append(Issue(severity="info", code="scale_by_ocr", sheet=ocr_scales[0][0], page=ocr_scales[0][2],
+                            message="Scales drawn as line strokes, not text, were read from the drawing: "
+                                    + ", ".join(f"{sid} 1\" = {ft:g}'" for sid, ft, _ in ocr_scales) + ". Check them in Plans → Sheets & calibration."))
     sid_of = {sheet_key(s.document_id, s.page): s.id for s in sheets}
     sheet_of = {sheet_key(s.document_id, s.page): s for s in sheets}
 
     # 1b. roadway centerlines, stationing and edges (sheet feet) -------------
     road: dict[str, dict] = {}
+    no_cl: list[tuple] = []
     for key, r in rep_by_key.items():
         if not r.linework:
             continue
@@ -109,8 +114,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         res = read_roadway_sheet(r.linework, stations, labels, cal.ft_per_pt, max(12.0, min(r.width_pt, r.height_pt) * 0.02))
         if not res:
             if len(stations) >= 2 and r.category in ROAD_CATEGORIES:
-                issues.append(Issue(severity="info", code="no_centerline", sheet=sid, page=r.page,
-                                    message=f"{sid} has station labels, but no centerline with road edges on both sides was found along them."))
+                no_cl.append((sid, r.page))
             continue
         measured_in = res["measured_ft_per_pt"] * 72
         if cal.ft_per_pt is None:
@@ -125,6 +129,10 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                                         "A half-size print or a wrong scale note? Set the scale in Plans."))
         res["matchlines"] = [(c.values["station"], c.values.get("sheet_ref"), sid) for c in r.candidates if c.kind == "matchline"]
         road[key] = res
+
+    if no_cl:
+        issues.append(Issue(severity="info", code="no_centerline", sheet=no_cl[0][0], page=no_cl[0][1],
+                            message=f"{', '.join(x for x, _ in no_cl)} {'have' if len(no_cl) > 1 else 'has'} station labels, but no centerline with road edges on both sides was found along them."))
 
     # 2. structure positions on each calibrated plan sheet (sheet-local feet) ----
     local: dict[str, dict[str, tuple]] = {}
@@ -214,14 +222,23 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
     if groups:
         registered, found = max(groups, key=lambda g: _group_value(g[0], rep_by_key, local, ctrl_of))
         issues.extend(found)
+        model = ", ".join(sid_of[k] for k in rep_by_key if k in registered)
+        singles = []
         for reg, _ in groups:
             if reg is registered:
                 continue
-            names = ", ".join(sid_of[k] for k in rep_by_key if k in reg)
-            for key in reg:
-                issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[key], page=rep_by_key[key].page,
-                                    message=(f"{sid_of[key]} isn't tied to the model's sheets ({', '.join(sid_of[k] for k in rep_by_key if k in registered)}): no shared structures, matchline or reference marks"
-                                             + (f"; it lines up with {names}" if len(reg) > 1 else "") + ". Add control points to register it.")))
+            keys = [k for k in rep_by_key if k in reg]
+            if len(keys) == 1:
+                singles += keys
+                continue
+            issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[keys[0]], page=rep_by_key[keys[0]].page,
+                                message=f"{', '.join(sid_of[k] for k in keys)} line up with each other but are not tied to the model's sheets ({model}): "
+                                        "no shared structures, matchline or reference marks. Add control points to place them."))
+        if singles:
+            singles.sort(key=list(rep_by_key).index)
+            issues.append(Issue(severity="warning", code="unregistered_sheet", sheet=sid_of[singles[0]], page=rep_by_key[singles[0]].page,
+                                message=f"{', '.join(sid_of[k] for k in singles)} {'are' if len(singles) > 1 else 'is'} not tied to the model's sheets ({model}) "
+                                        f"or to each other: no shared structures, matchline or reference marks. Add control points to place {'them' if len(singles) > 1 else 'it'}."))
     for key, sim in registered.items():
         cals[key].to_project = sim
         for s in sheets:
@@ -249,12 +266,13 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
 
     structures: list[Structure] = []
     invs_by_id: dict[str, list] = {}
+    unplaced: list[tuple[str, list]] = []
     for sid, e in sorted(by_id.items()):
         prefix = sid.split("-")[0]
         cat = next((c for c in e["cats"] if c in PLAN_CATEGORIES), next(iter(e["cats"])))
         system = _system_for(prefix, cat)
         if not e["pos"]:
-            issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(sorted(e['sheets']))} but not on a scaled, registered plan sheet, so it has no location."))
+            unplaced.append((sid, sorted(e["sheets"])))
             continue
         xs = np.array([p["x"] for p in e["pos"]])
         zs = np.array([p["z"] for p in e["pos"]])
@@ -271,6 +289,14 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         structures.append(Structure(id=sid, system=system, kind=KIND_BY_PREFIX.get(prefix, "OTHER"), x=position.value[0], z=position.value[1],
                                     position=position, rim=rim, type=Fact[str](value=None, status=Status.missing), sheet=best_pos["sheet"]))
         invs_by_id[sid] = e["invs"]
+
+    if len(unplaced) <= 3:
+        for sid, on in unplaced:
+            issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(on)} but not on a scaled, registered plan sheet, so it has no location."))
+    elif unplaced:
+        on = sorted({x for _, x_ in unplaced for x in x_})
+        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(s_ for s_, _ in unplaced)}) appear only on sheets that aren't placed in the model "
+                                                                             f"({', '.join(on)}), so they have no location yet."))
 
     # 5. pipes from plan line work ------------------------------------------
     st_by = {s.id: s for s in structures}
@@ -348,14 +374,21 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         if key not in registered:
             continue
         cal = cals[key]
-        for c in r.candidates:
+        bad = _contour_outliers(r)
+        for c, near in bad:
+            issues.append(Issue(severity="warning", code="contour_outlier", sheet=sid_of[key], page=r.page,
+                                message=f"Contour labelled “{c.text}” on {sid_of[key]} doesn't fit the contours around it (about {near:.0f}): left out of the surface. "
+                                        "A label clipped at the sheet edge or misread?"))
+        skip = {id(c) for c, _ in bad}
+        for c in _surface_candidates(r):
+            if id(c) in skip:
+                continue
+            which = _surface_role(c)
             if c.kind == "spot":
-                which = "proposed" if c.label in PROPOSED_CODES else "existing" if c.label in EXISTING_CODES else None
                 if which:
                     x, z = cal.pt_to_project(c.x, c.y)
                     pts[which].append((float(x), float(z), c.values["elev"] + elevation_offset))
-            elif c.kind == "contour":
-                which = c.values.get("surface") or ("existing" if c.values["dashed"] else "proposed")
+            else:
                 arr = np.array(c.values["pts"])
                 x, z = cal.pt_to_project(arr[:, 0], arr[:, 1])
                 pts[which].extend((float(a), float(b), c.values["elev"] + elevation_offset) for a, b in zip(x, z))
@@ -373,7 +406,13 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cell = max(1.0, round(ext / 120))
         nx, nz = int(math.ceil((arr[:, 0].max() - x0) / cell)), int(math.ceil((arr[:, 1].max() - z0) / cell))
         try:
-            g = TIN(arr[:, 0], arr[:, 1], arr[:, 2], max_edge=MAX_TIN_EDGE_FT).to_grid(x0, z0, cell, nx, nz)
+            tin = TIN(arr[:, 0], arr[:, 1], arr[:, 2], max_edge=MAX_TIN_EDGE_FT)
+            g = tin.to_grid(x0, z0, cell, nx, nz)
+            if tin.dropped_area > 43560 * 0.25:
+                issues.append(Issue(severity="warning", code=f"{which}_surface_gaps",
+                                    message=f"{tin.dropped_area / 43560:.1f} acres between the {which} contours have no labelled elevations, so they are left out of the "
+                                            f"{'existing' if which == 'existing' else 'finished'} surface and the earthwork: gaps between graded areas, or areas drawn only "
+                                            "with unlabelled contours (a stockpile or pad top, say). Earthwork may be under-counted there."))
         except Exception as ex:  # degenerate point sets
             issues.append(Issue(severity="warning", code=f"{which}_surface_failed", message=f"Could not triangulate the {which} surface: {ex}"))
             continue
@@ -629,12 +668,43 @@ def _same_view(a: SheetReport, b: SheetReport, ka: float, kb: float, furniture: 
 
 def _group_value(reg: dict, rep_by_key: dict, local: dict, ctrl_of: dict) -> tuple:
     """Survey control first, then both surfaces (earthwork), then structures, then everything else read."""
-    roles = set()
+    n = defaultdict(int)
     for k in reg:
-        for c in rep_by_key[k].candidates:
-            if c.kind == "contour":
-                roles.add(c.values.get("surface") or ("existing" if c.values["dashed"] else "proposed"))
-            elif c.kind == "spot":
-                roles.add("proposed" if c.label in PROPOSED_CODES else "existing" if c.label in EXISTING_CODES else "")
-    return (any(ctrl_of.get(k) for k in reg), len(roles & {"existing", "proposed"}), sum(len(local.get(k, {})) for k in reg),
+        for c in _surface_candidates(rep_by_key[k]):
+            n[_surface_role(c)] += len(c.values["pts"]) if c.kind == "contour" else 1
+    surfaces = sum(1 for r in ("existing", "proposed") if n[r] >= 12)
+    return (any(ctrl_of.get(k) for k in reg), surfaces, sum(len(local.get(k, {})) for k in reg),
             sum(len(rep_by_key[k].candidates) for k in reg), len(reg))
+
+
+def _surface_candidates(r: SheetReport):
+    """Spot elevations and contours that describe the ground. Not on roadway (plan & profile) sheets, where
+    "EG 985.32 / FG 984.10" labels and elevation grid lines belong to the profile, not to points on the plan."""
+    if r.category in ROAD_CATEGORIES:
+        return []
+    return [c for c in r.candidates if c.kind in ("spot", "contour")]
+
+
+def _surface_role(c) -> str | None:
+    if c.kind == "contour":
+        return c.values.get("surface") or ("existing" if c.values["dashed"] else "proposed")
+    return "proposed" if c.label in PROPOSED_CODES else "existing" if c.label in EXISTING_CODES else None
+
+
+def _contour_outliers(r: SheetReport) -> list[tuple]:
+    """Labelled contours whose elevation is far from the labelled contours nearest them: (candidate, neighbours' median)."""
+    cs = [c for c in _surface_candidates(r) if c.kind == "contour"]
+    if len(cs) < 6:
+        return []
+    xy = np.array([[c.x, c.y] for c in cs])
+    el = np.array([c.values["elev"] for c in cs])
+    steps = np.diff(np.unique(el))
+    interval = float(np.median(steps)) if len(steps) else 1.0
+    out = []
+    for i, c in enumerate(cs):
+        d = np.hypot(*(xy - xy[i]).T)
+        d[i] = np.inf
+        near = float(np.median(el[np.argsort(d)[:5]]))
+        if abs(el[i] - near) > max(10 * interval, 25.0):
+            out.append((c, near))
+    return out
