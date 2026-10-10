@@ -218,6 +218,13 @@ p{margin:0}
 .calib b{font:600 12.5px var(--f-mono);color:var(--accent)}
 .calib small{display:block;color:var(--muted);font-size:12px}
 .calib .sc{display:flex;gap:4px;align-items:center;grid-column:1/-1}
+#matchBox{border:1px solid var(--accent);border-radius:12px;padding:10px;margin:6px 0 12px;display:flex;flex-direction:column;gap:8px}
+#matchBox .mimg{position:relative;overflow:auto;max-height:46vh;border:1px solid var(--line);border-radius:8px;background:#fff;touch-action:pan-x pan-y}
+#matchBox .mimg img{display:block;width:100%;cursor:crosshair}
+#matchBox .mimg.next{outline:2px solid var(--accent)}
+#matchBox .dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid var(--accent);background:rgba(255,92,158,.35);pointer-events:none;font:600 10px var(--f-mono);color:#000;text-align:center;line-height:10px}
+#matchBox .mhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+#matchBox select{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 8px}
 .calib .sc input{width:5.5em}
 #datumForm .calib{grid-template-columns:4.2em minmax(7em,1fr) minmax(0,1fr)}
 .srcimg{grid-column:1/-1;max-width:100%;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:4px}
@@ -321,6 +328,7 @@ p{margin:0}
         <h4>Utility crossings</h4>
         <ul class="list" id="xList"></ul>
         <h4>Sheets &amp; calibration</h4>
+        <div id="matchBox" hidden></div>
         <div id="sheets"></div>
         <div id="surfBox" hidden><h4>Imported surfaces</h4><div id="surfs"></div></div>
         <h4>Datum &amp; units</h4>
@@ -730,10 +738,40 @@ $('#dockBody').addEventListener('click',async e=>{const b=e.target.closest('[dat
   else if(a==='fly')flyToObj(id);else if(a==='iso')isolate(id);else if(a==='cross')goCross(id);
   else if(a==='sel'){if(getObj(id))select(id,{fly:true});}
   else if(a==='ask')ask(b.dataset.q);
+  else if(a==='place')openMatch(b.dataset.doc,b.dataset.page,b.dataset.id);
+  else if(a==='mundo'){MATCH.taps.pop();renderMatch();}
+  else if(a==='mcancel'){MATCH=null;renderMatch();}
+  else if(a==='msave')saveMatch();
+  else if(a==='mzoom'){MATCH.zoom=Math.max(1,Math.min(4,MATCH.zoom*(+b.dataset.z>0?1.5:1/1.5)));renderMatch();}
   else if(a==='scale'){const inp=b.parentElement.querySelector('input'),v=parseFloat(inp.value);if(!(v>0)){toast('Enter feet per inch, e.g. 40');return;}
     try{toast('Recalibrating…');await refresh(await api(`/api/projects/${PRJ.id}/calibration`,jsonOpts('PUT',{document_id:b.dataset.doc,page:+b.dataset.page,scale_ft_per_in:v})),'Scale saved; model rebuilt');buildSite();buildUtil();flyHome();}catch(err){toast(err.message);}}});
 function goCross(cid){const c=crossings.find(x=>x.id===cid);if(!c)return;if(st.mode==='finished'||st.fps)setMode('xray');else setXray(true);if(st.stage<4)setStage(7);
   [sysOf(c.upper),sysOf(c.lower)].forEach(s=>{if(s)Lon[s]=true;});applyVis();select(c.upper,{open:true});const t=V3(c.x,wy(c.elev_mid),c.z);flyTo(t,t.clone().add(V3(-34,30,42)));}
+
+// ===== Placing a sheet by matching points with a placed sheet =====
+const MDPI=60;let MATCH=null;
+function placedSheets(){return(PRJ&&PRJ.sheets||[]).filter(s=>s.registered&&s.document_id);}
+function pageImg(doc,page){return`${API}/api/documents/${doc}/pages/${page}.png?dpi=${MDPI}`;}
+function openMatch(doc,page,id){const refs=placedSheets();if(!refs.length){toast('Nothing is placed yet to match against');return;}
+  MATCH={doc,page:+page,id,ref:refs[0],taps:[],zoom:1};renderMatch();$('#matchBox').scrollIntoView({block:'nearest'});}
+function renderMatch(){const box=$('#matchBox');if(!MATCH){box.hidden=true;box.innerHTML='';return;}box.hidden=false;const M=MATCH,n=M.taps.length,want=n%2===0?'this':'ref',pt=Math.floor(n/2)+1;
+  const refs=placedSheets(),dots=w=>M.taps.map((t,i)=>t.w===w?`<span class="dot" style="left:${t.fx*100}%;top:${t.fy*100}%">${Math.floor(i/2)+1}</span>`:'').join('');
+  box.innerHTML=`<div class="mhead"><b>Place ${esc(M.id)}</b><span class="small muted">Zoom <button class="btn sm" data-act="mzoom" data-z="-1">−</button><button class="btn sm" data-act="mzoom" data-z="1">+</button></span></div>
+    <p class="note">Tap the same spot on both sheets: a manhole, a road or pad corner, a property corner. Then a second spot, far from the first.</p>
+    <div class="mhead"><span class="small muted">${esc(M.id)}</span></div><div class="mimg ${want==='this'&&n<4?'next':''}" data-w="this"><img alt="Sheet ${esc(M.id)}" src="${pageImg(M.doc,M.page)}" style="width:${M.zoom*100}%">${dots('this')}</div>
+    <div class="mhead"><span class="small muted">Match with</span><select id="mRef" aria-label="Placed sheet to match with">${refs.map(r=>`<option value="${r.document_id}:${r.page}"${r===M.ref?' selected':''}>${esc(r.id)} · ${esc(r.title)}</option>`).join('')}</select></div>
+    <div class="mimg ${want==='ref'&&n<4?'next':''}" data-w="ref"><img alt="Sheet ${esc(M.ref.id)}" src="${pageImg(M.ref.document_id,M.ref.page)}" style="width:${M.zoom*100}%">${dots('ref')}</div>
+    <p class="note" id="mStat">${n>=4?'Both points matched. Place the sheet, or undo to adjust.':`Point ${pt}: tap it on ${want==='this'?esc(M.id):esc(M.ref.id)}.`}</p>
+    <div class="row-btns"><button class="btn" data-act="mundo"${n?'':' disabled'}>Undo</button><button class="btn" data-act="mcancel">Cancel</button><button class="btn pri" data-act="msave"${n>=4?'':' disabled'}>Place sheet</button></div>`;
+  box.querySelector('#mRef').onchange=e=>{const[d,p]=e.target.value.split(':');M.ref=refs.find(r=>r.document_id===d&&r.page===+p);M.taps=[];renderMatch();};
+  box.querySelectorAll('.mimg').forEach(div=>div.querySelector('img').addEventListener('click',e=>{const w=div.dataset.w,want2=M.taps.length%2===0?'this':'ref';
+    if(M.taps.length>=4){toast('Both points are matched; undo to change one');return;}
+    if(w!==want2){toast(`Tap point ${Math.floor(M.taps.length/2)+1} on ${want2==='this'?M.id:M.ref.id} next`);return;}
+    const img=e.target,fx=e.offsetX/img.clientWidth,fy=e.offsetY/img.clientHeight;
+    M.taps.push({w,fx,fy,x:fx*img.naturalWidth*72/MDPI,y:fy*img.naturalHeight*72/MDPI});renderMatch();}));}
+async function saveMatch(){const M=MATCH,t=M.taps,pairs=[[t[0].x,t[0].y,t[1].x,t[1].y],[t[2].x,t[2].y,t[3].x,t[3].y]];
+  try{toast('Placing…');const r=await api(`/api/projects/${PRJ.id}/match`,jsonOpts('PUT',{document_id:M.doc,page:M.page,ref_document_id:M.ref.document_id,ref_page:M.ref.page,pairs}));
+    MATCH=null;renderMatch();await refresh(r,`${M.id} placed`);lastPaint='';buildSite();buildUtil();}catch(err){toast(err.message);}}
 
 // ===== Plans panel (projects, upload, review, issues, calibration) =====
 const fname=f=>({inv_up:'upstream invert',inv_dn:'downstream invert',rim:'rim',material:'material',type:'type',cover:'cover',dia_in:'diameter'})[f]||f;
@@ -746,7 +784,7 @@ function renderReview(){if(!PRJ)return;const sc=AN.status_counts||{};const v=(sc
   $('#issList').innerHTML=iss.length?iss.slice().sort((a,b)=>order[a.severity]-order[b.severity]).slice(0,80).map(i=>`<div class="issue"><span class="sev ${i.severity}">${i.severity}</span><span>${esc(i.message)}${i.object_id&&getObj(i.object_id)?` <button class="btn sm" data-act="sel" data-id="${esc(i.object_id)}">Show</button>`:''}</span></div>`).join(''):'<p class="note">No issues found.</p>';
   $('#xList').innerHTML=crossings.length?crossings.map(c=>`<li><button class="item ${c.severity==='conflict'?'bad':''}" data-act="cross" data-id="${c.id}"><span class="t">${c.upper} over ${c.lower}</span><span class="pill ${c.severity==='conflict'?'warn':c.severity==='tight'?'ai':'v'}">${inch(c.clearance_ft)} clear</span><span class="s">${where(c.x,c.z)}. ${c.severity==='clear'?'Clears typical separation.':'Required clearance must be verified against project specs.'}</span></button></li>`).join(''):'<li class="note">No crossings between utilities with known locations and inverts.</li>';
   $('#sheets').innerHTML=PRJ.sheets.length?PRJ.sheets.map(s=>`<div class="calib"><b>${esc(s.id)}</b><span>${esc(s.title)}<small>${esc(s.category.replace('_',' '))} · ${s.scale_ft_per_in?`1″ = ${s.scale_ft_per_in}′`:'no scale'}${s.document_id?' · '+(s.registered?'placed in model':'not placed'):''} · ${esc(s.notes)}</small></span><span></span>
-      ${s.document_id&&!PRJ.demo?`<span class="sc"><span class="small muted">Scale 1″ =</span><input type="number" inputmode="decimal" value="${s.scale_ft_per_in||''}" aria-label="Feet per inch for ${esc(s.id)}"><span class="small muted">ft</span><button class="btn sm" data-act="scale" data-doc="${s.document_id}" data-page="${s.page}">Set</button></span>`:''}</div>`).join(''):'<p class="note">No sheets yet. Upload a PDF plan set.</p>';
+      ${s.document_id&&!PRJ.demo?`<span class="sc"><span class="small muted">Scale 1″ =</span><input type="number" inputmode="decimal" value="${s.scale_ft_per_in||''}" aria-label="Feet per inch for ${esc(s.id)}"><span class="small muted">ft</span><button class="btn sm" data-act="scale" data-doc="${s.document_id}" data-page="${s.page}">Set</button>${!s.registered&&s.scale_ft_per_in&&placedSheets().length?`<button class="btn sm pri" data-act="place" data-doc="${s.document_id}" data-page="${s.page}" data-id="${esc(s.id)}">Place</button>`:''}</span>`:''}</div>`).join(''):'<p class="note">No sheets yet. Upload a PDF plan set.</p>';
   const IS=PRJ.imported_surfaces||[],RL={existing:'Existing ground',proposed:'Finished grade',ignore:'Not used'};$('#surfBox').hidden=!IS.length;
   $('#surfs').innerHTML=IS.map(s=>`<div class="calib"><b>${s.used?'In use':'—'}</b><span>${esc(s.name)}<small>${s.points.toLocaleString()} points · ${s.faces.toLocaleString()} triangles${s.desc?' · '+esc(s.desc):''}${s.role&&s.role_source==='name'?' · role read from its name':''}</small></span><span></span>
       <span class="sc"><span class="small muted">Role</span><select data-act="role" data-doc="${s.document_id}" data-i="${s.index}" aria-label="Role of surface ${esc(s.name)}"${PRJ.demo?' disabled':''}>${s.role?'':'<option value="" selected>Choose…</option>'}${Object.entries(RL).map(([k,l])=>`<option value="${k}"${s.role===k?' selected':''}>${l}</option>`).join('')}</select></span></div>`).join('');
@@ -762,7 +800,7 @@ $('#datumForm').addEventListener('submit',async e=>{e.preventDefault();try{const
   await refresh(await api(`/api/projects/${PRJ.id}/datum`,jsonOpts('PUT',body)),'Datum saved; model rebuilt');buildSite();buildUtil();}catch(err){toast(err.message);}});
 async function loadProjects(selectId){const list=await api('/api/projects');$('#prjSel').innerHTML=list.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.demo?' (demo)':''}</option>`).join('');
   const id=selectId||store.get('gv.project')||(list.find(p=>!p.demo)||list[0]||{}).id;if(id){$('#prjSel').value=id;await openProject(id);}}
-async function openProject(id){const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
+async function openProject(id){MATCH=null;renderMatch();const data=await api(`/api/projects/${id}`);store.set('gv.project',id);if(st.sim)endSim(true);st.sel=null;PRJ=data.project;AN=data.analysis;
   S={};PRJ.structures.forEach(s=>S[s.id]=s);PIPES=PRJ.pipes;LINES={};PRJ.lines.forEach(l=>LINES[l.id]=l);lastPaint='';buildSite();buildUtil();renderInspect();renderReview();
   const empty=!PRJ.structures.length&&!PRJ.existing&&!PRJ.proposed;showBanner(empty?`<b>No model yet.</b> Open <b>Plans</b> and upload a PDF plan set. TerraVision reads sheet numbers, scales, contours, spot elevations, structures, rims, inverts and pipe callouts, then builds the 3D model from what it finds.`:'');
   setStage(st.stage,true);setMode(PRJ.structures.length?'xray':'bird');const h=homePose();camera.position.copy(h.p);controls.target.copy(h.t);st.tween=null;

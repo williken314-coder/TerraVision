@@ -155,7 +155,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
             local[key] = pos
 
     # 3. register sheets into one frame: shared structures, matchline stationing, or the same view ----
-    placeable = [k for k, r in rep_by_key.items() if r.category in PLAN_CATEGORIES and cals[k].ft_per_pt and (r.candidates or k in road)]
+    placeable = [k for k, r in rep_by_key.items() if r.category in PLAN_CATEGORIES and cals[k].ft_per_pt and (r.candidates or k in road or r.control)]
     furniture = _furniture_marks([rep_by_key[k] for k in placeable])
     ctrl_of = {k: overrides.get(k, {}).get("control_points") for k in placeable}
     # printed N/E callouts: control points read off the sheet, used where a person hasn't set any
@@ -217,6 +217,30 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
                     if sim.rms > 2.0:
                         found.append(Issue(severity="warning", code="registration_residual", sheet=sid_of[key], page=rep_by_key[key].page,
                                            message=f"Shared structures on {sid_of[key]} line up with {sid_of[primary]} only to {sim.rms:.1f} ft RMS."))
+            # points a person matched between two sheets: whichever is placed places the other
+            for key, ov in overrides.items():
+                m = ov.get("match") or {}
+                rk = m.get("ref")
+                if key not in rep_by_key or rk not in rep_by_key or len(m.get("pairs", [])) < 2 or (key in reg) == (rk in reg):
+                    continue
+                pairs = np.array(m["pairs"], float)
+                if key in reg:  # the reference is the one to place
+                    new, old, pn, po = rk, key, pairs[:, 2:4], pairs[:, 0:2]
+                else:
+                    new, old, pn, po = key, rk, pairs[:, 0:2], pairs[:, 2:4]
+                if new not in placeable:
+                    continue
+                kn, ko = cals[new].ft_per_pt, cals[old].ft_per_pt
+                sim = fit_similarity(pn * kn, np.column_stack(reg[old].apply(po[:, 0] * ko, po[:, 1] * ko)))
+                reg[new] = sim
+                changed = True
+                found.append(Issue(severity="info", code="placed_by_match", sheet=sid_of[new], page=rep_by_key[new].page,
+                                   message=f"{sid_of[new]} placed from {len(pairs)} points you matched with {sid_of[old]}"
+                                           + (f" (they agree to {sim.rms:.1f} ft)." if len(pairs) > 2 else ".")))
+                if abs(sim.scale - 1) > 0.03:
+                    found.append(Issue(severity="warning", code="match_scale", sheet=sid_of[new], page=rep_by_key[new].page,
+                                       message=f"The points matched between {sid_of[key]} and {sid_of[rk]} imply scales {abs(sim.scale - 1) * 100:.0f}% apart. "
+                                               "Check the points, or the sheets' scales."))
             for key in [k for k in placeable if k not in reg]:
                 for rk in [k for k in placeable if k in reg]:
                     if _same_view(rep_by_key[key], rep_by_key[rk], cals[key].ft_per_pt, cals[rk].ft_per_pt, furniture):

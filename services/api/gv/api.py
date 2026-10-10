@@ -245,6 +245,44 @@ def set_datum(pid: str, d: Datum, db: Session = Depends(get_db)):
     return _payload(rebuild_project(db, pid))
 
 
+class Match(BaseModel):
+    document_id: str
+    page: int
+    ref_document_id: str
+    ref_page: int
+    # [[x_pt, y_pt, ref_x_pt, ref_y_pt], ...]: the same point on this sheet and on the reference sheet
+    pairs: list[list[float]]
+
+
+@app.put("/api/projects/{pid}/match")
+def set_match(pid: str, m: Match, db: Session = Depends(get_db)):
+    """Place a sheet from points a person matched with a sheet that is already placed (or clear it with no pairs)."""
+    row, prj = _load(db, pid)
+    if prj.demo:
+        raise HTTPException(400, "The demo project is read-only")
+    if m.pairs and (len(m.pairs) < 2 or any(len(p) != 4 for p in m.pairs)):
+        raise HTTPException(422, "Match at least two points, each as [x, y, ref_x, ref_y]")
+    if m.pairs:
+        (a, b), (c, d) = m.pairs[0][:2], m.pairs[1][:2]
+        if abs(a - c) + abs(b - d) < 30:
+            raise HTTPException(422, "Pick the two points well apart; points close together can't fix the sheet's direction")
+    key, ref = f"{m.document_id}:{m.page}", f"{m.ref_document_id}:{m.ref_page}"
+    if key == ref:
+        raise HTTPException(422, "Match against a different sheet")
+    ov = dict(row.overrides or {})
+    sheets = dict(ov.get("sheets", {}))
+    entry = dict(sheets.get(key, {}))
+    if m.pairs:
+        entry["match"] = {"ref": ref, "pairs": m.pairs}
+    else:
+        entry.pop("match", None)
+    sheets[key] = entry
+    ov["sheets"] = sheets
+    row.overrides = ov
+    db.commit()
+    return _payload(rebuild_project(db, pid))
+
+
 class SurfaceRole(BaseModel):
     document_id: str
     index: int

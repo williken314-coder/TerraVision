@@ -138,3 +138,28 @@ def test_model_is_built_on_the_earthwork_group():
     msgs = [i.message for i in res["issues"] if i.code == "unregistered_sheet"]
     assert msgs == ["C07, C08 line up with each other but are not tied to the model's sheets (G03, G04): no shared structures, matchline "
                     "or reference marks. Add control points to place them."]
+
+
+def test_matched_points_join_the_earthwork_to_real_coordinates():
+    eg = sheet(0, "G03", "EXISTING GRADE CONTOURS", "existing", TARGETS, ramp(900, "existing", 300, 300))
+    fg = sheet(1, "G04", "FINISHED GRADE CONTOURS", "grading", TARGETS, ramp(905, "proposed", 320, 300))
+    ac = sheet(2, "AC01", "ALIGNMENT CONTROL PLAN I", "roadway", [])
+    ac.scale_ft_per_in = 20
+    k_ac, k_g = 20 / 72, 50 / 72
+    E0, N0 = 1_791_000.0, 131_000.0  # AC01's sheet origin in real coordinates (north up)
+
+    def real(x, y):  # an AC01 page point in real E, N
+        return E0 + x * k_ac, N0 - y * k_ac
+    ac.control = [dict(x=x, y=y, e=real(x, y)[0], n=real(x, y)[1], text="", bbox=[]) for x, y in [(300, 300), (1500, 400), (900, 1200)]]
+    # without a match: the earthwork group is the model, AC01 stands apart
+    res = assemble([("d", r) for r in (eg, fg, ac)])
+    assert {s.id for s in res["sheets"] if s.registered} == {"G03", "G04"} and not res["real_frame"]
+    # G04's page point (p) shows the same spot as AC01's page point (q): G04 sits 200 ft east, 100 ft south of AC01's origin
+    g04_to_ac = lambda x, y: ((x * k_g + 200) / k_ac, (y * k_g + 100) / k_ac)
+    pairs = [[x, y, *g04_to_ac(x, y)] for x, y in [(400, 400), (1200, 900)]]
+    res = assemble([("d", r) for r in (eg, fg, ac)], {"d:1": {"match": {"ref": "d:2", "pairs": pairs}}}, false_origin=[E0, N0])
+    assert {s.id for s in res["sheets"] if s.registered} == {"G03", "G04", "AC01"} and res["real_frame"]
+    assert ("placed_by_match", "G04") in [(i.code, i.sheet) for i in res["issues"]]
+    # G03 (same view as G04) lands where AC01's coordinates say: project x = E - E0, z = -(N - N0)
+    g = res["existing"]
+    assert g.x0 == pytest.approx(300 * k_g + 200, abs=15) and g.z0 == pytest.approx(300 * k_g + 100, abs=15)
