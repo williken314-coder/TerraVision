@@ -11,4 +11,5 @@ COPY apps/web /web
 ENV GV_WEB_DIR=/web GV_DATA_DIR=/data
 VOLUME /data
 EXPOSE 8000
-CMD ["uvicorn", "gv.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# hosts such as Render set PORT; 8000 otherwise
+CMD ["sh", "-c", "exec uvicorn gv.api:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

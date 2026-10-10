@@ -1,0 +1,22 @@
+# Render Blueprint: New -> Blueprint -> pick this repository. Render builds the Docker image, asks for the
+# password, and keeps uploads on the disk below. See README "Putting it online".
+services:
+  - type: web
+    name: terravision
+    runtime: docker
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: standard  # 2 GB of memory: reading a large plan set takes about 1.1 GB; 512 MB plans run out
+    healthCheckPath: /api/health
+    envVars:
+      - key: GV_PASSWORD  # Render asks for it when the Blueprint is created; never run without one
+        sync: false
+      - key: GV_DATA_DIR
+        value: /data
+      - key: ANTHROPIC_API_KEY  # optional: vision reading of scanned sheets and open-ended questions
+        sync: false
+    disk:
+      name: terravision-data
+      mountPath: /data
+      sizeGB: 10

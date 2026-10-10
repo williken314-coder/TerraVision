@@ -48,6 +48,17 @@ docker run -p 8000:8000 -e GV_PASSWORD='choose-one' -v terravision-data:/data te
 
 Uploads and the database live in `/data`: give it a persistent volume or they're lost on redeploy. One container is enough (SQLite); set `DATABASE_URL` for PostgreSQL/PostGIS (`docker compose up --build` runs both). A 36-sheet set takes about 4 minutes to read, mostly OCR of stroke-drawn scales; it runs in the background after upload. Uploads are limited to `GV_MAX_UPLOAD_MB` (200 by default) and need about 1 GB of memory while a large set is read.
 
+#### On Render (no command line)
+
+`render.yaml` sets everything up:
+
+1. Sign up at [render.com](https://render.com) with your GitHub account, and let it see this repository.
+2. **New → Blueprint**, pick the repository and the branch that has `render.yaml`.
+3. When asked, enter **GV_PASSWORD** (the password everyone will sign in with). Leave **ANTHROPIC_API_KEY** empty unless you want the AI extras below.
+4. **Apply.** The first build takes about 10 minutes. Then open the address Render shows (`https://terravision-….onrender.com`), sign in with any user name and the password, and upload plans. On a phone, "Add to Home Screen" makes it open like an app.
+
+It runs on Render's **Standard** instance (2 GB of memory; reading a large set needs about 1.1 GB, so the 512 MB Starter runs out) with a 10 GB disk for uploads: roughly $25 + $2.50 a month at Render's current prices. Pushing to the branch redeploys it; uploads and projects stay on the disk.
+
 ### Optional AI features
 
 Set `ANTHROPIC_API_KEY` on the server to turn on:
