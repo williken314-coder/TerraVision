@@ -314,7 +314,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         cat = next((c for c in e["cats"] if c in PLAN_CATEGORIES), next(iter(e["cats"])))
         system = _system_for(prefix, cat)
         if not e["pos"]:
-            unplaced.append((sid, sorted(e["sheets"])))
+            unplaced.append((sid, sorted(e["sheets"]), system))
             continue
         xs = np.array([p["x"] for p in e["pos"]])
         zs = np.array([p["z"] for p in e["pos"]])
@@ -333,11 +333,11 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         invs_by_id[sid] = e["invs"]
 
     if len(unplaced) <= 3:
-        for sid, on in unplaced:
+        for sid, on, _ in unplaced:
             issues.append(Issue(severity="warning", code="no_position", object_id=sid, message=f"{sid} appears on {', '.join(on)} but not on a scaled, registered plan sheet, so it has no location."))
     elif unplaced:
-        on = sorted({x for _, x_ in unplaced for x in x_})
-        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(s_ for s_, _ in unplaced)}) appear only on sheets that aren't placed in the model "
+        on = sorted({x for _, x_, _ in unplaced for x in x_})
+        issues.append(Issue(severity="warning", code="no_position", message=f"{len(unplaced)} structures ({', '.join(s_ for s_, _, _ in unplaced)}) appear only on sheets that aren't placed in the model "
                                                                              f"({', '.join(on)}), so they have no location yet."))
 
     # 5. pipes from plan line work ------------------------------------------
@@ -482,7 +482,7 @@ def assemble(reports: list[tuple[str, SheetReport]], overrides: dict | None = No
         corridor.pavement_section = _pavement_section(rep_by_key, sid_of, doc_of, issues)
 
     return dict(sheets=sheets, structures=structures, pipes=pipes, existing=surfaces.get("existing"), proposed=surfaces.get("proposed"),
-                alignment=alignment, corridor=corridor, issues=issues, real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
+                alignment=alignment, corridor=corridor, issues=issues, unplaced=[dict(id=a, sheets=b, system=c) for a, b, c in unplaced], real_frame=any(own_frame(k) for k in registered) if placeable else False, calibrations={k: dict(ft_per_pt=c.ft_per_pt, method=c.method, registered=c.to_project is not None,
                                                      transform=c.to_project.as_dict() if c.to_project else None) for k, c in cals.items()})
 
 

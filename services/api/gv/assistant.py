@@ -120,6 +120,13 @@ def answer(prj: Project, q: str, selected: str | None = None) -> dict:
             ss = [s for s in prj.structures if s.system == sys]
             ls = [l for l in prj.lines if l.system == sys]
             if not (ps or ss or ls):
+                found = [u for u in prj.unplaced if u.system == sys]
+                if found:
+                    on = sorted({x for u in found for x in u.sheets})
+                    return done(f"I found {len(found)} {SYS_NAME[sys]} structures by name ({', '.join(u.id for u in found)}) on {', '.join(on)}, "
+                                "but those sheets aren't placed in the model yet, so I can't show where they are. "
+                                "Place one of them in Plans → Sheets & calibration → **Place**: tap the same two spots on it and on a placed sheet.",
+                                [], on)
                 return done(f"No {SYS_NAME[sys]} was extracted from the uploaded sheets.")
             lf = sum(a["pipes"][p.id]["length"] for p in ps) + sum(a["lines"][l.id]["length"] for l in ls)
             sizes = sorted({p.dia_in.value for p in ps if p.dia_in.value})

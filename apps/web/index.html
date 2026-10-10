@@ -87,7 +87,8 @@ p{margin:0}
 .fields{display:flex;flex-direction:column;border-top:1px solid var(--line)}
 .f{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;padding:9px 0;border-bottom:1px solid var(--line);align-items:center}
 .f .k{font-size:14px;color:var(--muted);min-width:0}
-.f .val{font:500 15px var(--f-mono);font-variant-numeric:tabular-nums;text-align:right}
+.f .val{font:500 15px var(--f-mono);font-variant-numeric:tabular-nums;text-align:right;min-width:0;overflow-wrap:anywhere}
+#tFull{display:none}
 .f .meta{grid-column:1/-1;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .f .meta .src{font:11px var(--f-mono);color:var(--dim);margin-right:auto}
 .f input,.f select{background:var(--bg);border:1px solid var(--accent);border-radius:6px;padding:5px 8px;font:500 15px var(--f-mono);width:9.5em;max-width:100%}
@@ -158,7 +159,7 @@ p{margin:0}
 .tm input{width:100%;accent-color:var(--accent);margin:6px 0 2px}
 .ticks{display:grid;grid-template-columns:repeat(7,1fr);font:500 10.5px var(--f-mono);color:var(--dim);text-align:center;letter-spacing:.02em}
 .ticks span.on{color:var(--fg)}
-.hud{left:12px;padding:6px 10px;font:600 13px var(--f-mono);font-variant-numeric:tabular-nums;bottom:104px}
+.hud{left:12px;padding:6px 10px;font:600 13px var(--f-mono);font-variant-numeric:tabular-nums;bottom:104px;max-width:calc(100% - 88px);overflow-wrap:anywhere}
 .walkpad{right:12px;bottom:104px;display:flex;flex-direction:column;gap:6px}
 .walkpad button{width:52px;height:52px;border-radius:12px;font-size:20px;cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none}
 .drive{left:50%;transform:translateX(-50%);bottom:104px;padding:9px 16px;border-radius:999px;font-weight:700;cursor:pointer;color:var(--fg)}
@@ -190,6 +191,9 @@ p{margin:0}
   .tabs button[aria-selected="true"]{border-top-color:var(--accent)}
   #dock.collapsed .tabs button[aria-selected="true"]{border-top-color:transparent;color:var(--muted)}
   .tab-layers{display:block}
+  #tFull{display:block}
+  /* walking: the arrow pad takes the right edge of a short view, so the tool column steps aside */
+  #view:has(#walkpad:not([hidden])) .tr{display:none}
   .dock-body{order:1;max-height:46vh;max-height:46dvh}
   #dock.collapsed .dock-body{display:none}
   .ew dd{font-size:13px}
@@ -279,6 +283,7 @@ p{margin:0}
       <button class="tool" id="tXray" aria-pressed="true">X-ray</button>
       <button class="tool" id="tCF" aria-pressed="false">Cut/Fill</button>
       <button class="tool" id="tHome">Reset view</button>
+      <button class="tool" id="tFull" aria-pressed="false" aria-label="Map full screen">Full map</button>
     </div>
     <div class="ov hud glass" id="hud" hidden></div>
     <div class="ov walkpad" id="walkpad" hidden><button class="glass" id="wF" aria-label="Move forward">▲</button><button class="glass" id="wB" aria-label="Move back">▼</button></div>
@@ -887,6 +892,9 @@ function openTab(name,toggle){const btn=document.querySelector(`.tabs [data-tab=
   document.querySelectorAll('.tabs [data-tab]').forEach(b=>b.setAttribute('aria-selected',b.dataset.tab===name));
   $('#pInspect').hidden=name!=='inspect';$('#pReview').hidden=name!=='review';$('#pAsk').hidden=name!=='ask';$('#pLayers').hidden=name!=='layers'&&mq.matches;dock.classList.remove('collapsed');}
 document.querySelector('.tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]');if(b)openTab(b.dataset.tab,true);});
+const syncFull=()=>$('#tFull').setAttribute('aria-pressed',dock.classList.contains('collapsed'));
+$('#tFull').addEventListener('click',()=>{dock.classList.toggle('collapsed');syncFull();});
+new MutationObserver(syncFull).observe(dock,{attributes:true,attributeFilter:['class']});
 function placeLayers(){const pl=$('#pLayers');if(mq.matches){$('#dockBody').prepend(pl);pl.hidden=document.querySelector('.tabs [aria-selected="true"]').dataset.tab!=='layers';}
   else{$('#left').appendChild(pl);pl.hidden=false;if(document.querySelector('.tabs [aria-selected="true"]').dataset.tab==='layers')openTab('inspect');dock.classList.remove('collapsed');}}
 (mq.addEventListener?mq.addEventListener('change',placeLayers):mq.addListener(placeLayers));placeLayers();

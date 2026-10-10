@@ -175,3 +175,15 @@ def test_matched_points_that_disagree_on_scale_are_not_used():
     res = assemble([("d", r) for r in (eg, fg, other)], {"d:2": {"match": {"ref": "d:1", "pairs": pairs}}})
     assert "C19" not in {s.id for s in res["sheets"] if s.registered}
     assert any(i.code == "match_scale" and "isn't placed" in i.message for i in res["issues"])
+
+
+def test_assistant_explains_structures_found_on_unplaced_sheets():
+    from gv.assistant import answer
+    from gv.models import Project, UnplacedStructure
+
+    prj = Project(id="p", name="p", unplaced=[UnplacedStructure(id="CB-1", system="storm", sheets=["C07", "C11"]),
+                                              UnplacedStructure(id="DI-2", system="storm", sheets=["C08"])])
+    a = answer(prj, "Show me every storm pipe")
+    assert "CB-1, DI-2" in a["text"] and "aren't placed" in a["text"] and "Place" in a["text"]
+    assert {"C07", "C08", "C11"} <= set(a["sources"])
+    assert answer(Project(id="q", name="q"), "Show me every storm pipe")["text"].startswith("No storm")

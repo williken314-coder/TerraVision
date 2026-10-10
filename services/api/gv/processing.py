@@ -242,6 +242,7 @@ def rebuild_project(db: Session, pid: str) -> Project:
     prj.sheets, prj.structures, prj.pipes = result["sheets"], result["structures"], result["pipes"]
     prj.existing, prj.proposed, prj.issues = result["existing"], result["proposed"], result["issues"]
     prj.alignment, prj.corridor = result["alignment"], result["corridor"]
+    prj.unplaced = result["unplaced"]
     pdf_real_frame = result["real_frame"]
     if surfaces:
         _apply_landxml(db, prj, overrides, surfaces, pdf_real_frame, bool(prj.structures or prj.existing or prj.proposed))

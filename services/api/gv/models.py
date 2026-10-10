@@ -249,6 +249,14 @@ class ImportedSurface(BaseModel):
     used: bool = False  # this surface is the project's existing / finished surface
 
 
+class UnplacedStructure(BaseModel):
+    """A structure read by name on sheets that aren't placed in the model, so it has no location yet."""
+
+    id: str
+    system: System
+    sheets: list[str]
+
+
 class Project(BaseModel):
     id: str
     name: str
@@ -263,6 +271,7 @@ class Project(BaseModel):
     proposed: Optional[GridSurface] = None
     imported_surfaces: list[ImportedSurface] = []
     structures: list[Structure] = []
+    unplaced: list[UnplacedStructure] = []
     pipes: list[Pipe] = []
     lines: list[LinearUtility] = []
     buildings: list[Building] = []
